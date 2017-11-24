@@ -53,7 +53,7 @@ public class OioSctpServerChannel extends AbstractOioMessageChannel
     private static final InternalLogger logger =
             InternalLoggerFactory.getInstance(OioSctpServerChannel.class);
 
-    private static final ChannelMetadata METADATA = new ChannelMetadata(false);
+    private static final ChannelMetadata METADATA = new ChannelMetadata(false, 1);
 
     private static SctpServerChannel newServerSocket() {
         try {
@@ -91,7 +91,7 @@ public class OioSctpServerChannel extends AbstractOioMessageChannel
             sch.configureBlocking(false);
             selector = Selector.open();
             sch.register(selector, SelectionKey.OP_ACCEPT);
-            config = new DefaultSctpServerChannelConfig(this, sch);
+            config = new OioSctpServerChannelConfig(this, sch);
             success = true;
         } catch (Exception e) {
             throw new ChannelException("failed to initialize a sctp server channel", e);
@@ -153,7 +153,7 @@ public class OioSctpServerChannel extends AbstractOioMessageChannel
                 addresses.add((InetSocketAddress) socketAddress);
             }
             return addresses;
-        } catch (Throwable t) {
+        } catch (Throwable ignored) {
             return Collections.emptySet();
         }
     }
@@ -288,5 +288,21 @@ public class OioSctpServerChannel extends AbstractOioMessageChannel
     @Override
     protected void doWrite(ChannelOutboundBuffer in) throws Exception {
         throw new UnsupportedOperationException();
+    }
+
+    @Override
+    protected Object filterOutboundMessage(Object msg) throws Exception {
+        throw new UnsupportedOperationException();
+    }
+
+    private final class OioSctpServerChannelConfig extends DefaultSctpServerChannelConfig {
+        private OioSctpServerChannelConfig(OioSctpServerChannel channel, SctpServerChannel javaChannel) {
+            super(channel, javaChannel);
+        }
+
+        @Override
+        protected void autoReadCleared() {
+            clearReadPending();
+        }
     }
 }

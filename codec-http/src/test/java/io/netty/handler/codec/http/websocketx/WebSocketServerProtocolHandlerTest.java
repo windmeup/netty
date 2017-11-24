@@ -24,6 +24,7 @@ import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.http.DefaultFullHttpRequest;
 import io.netty.handler.codec.http.FullHttpRequest;
 import io.netty.handler.codec.http.FullHttpResponse;
+import io.netty.handler.codec.http.HttpHeaderValues;
 import io.netty.handler.codec.http.HttpMethod;
 import io.netty.handler.codec.http.HttpRequest;
 import io.netty.handler.codec.http.HttpRequestDecoder;
@@ -35,7 +36,6 @@ import org.junit.Test;
 import java.util.ArrayDeque;
 import java.util.Queue;
 
-import static io.netty.handler.codec.http.HttpHeaders.Values.*;
 import static io.netty.handler.codec.http.HttpResponseStatus.*;
 import static io.netty.handler.codec.http.HttpVersion.*;
 import static org.junit.Assert.*;
@@ -54,8 +54,11 @@ public class WebSocketServerProtocolHandlerTest {
         EmbeddedChannel ch = createChannel(new MockOutboundHandler());
         ChannelHandlerContext handshakerCtx = ch.pipeline().context(WebSocketServerProtocolHandshakeHandler.class);
         writeUpgradeRequest(ch);
-        assertEquals(SWITCHING_PROTOCOLS, ReferenceCountUtil.releaseLater(responses.remove()).getStatus());
-        assertNotNull(WebSocketServerProtocolHandler.getHandshaker(handshakerCtx));
+
+        FullHttpResponse response = responses.remove();
+        assertEquals(SWITCHING_PROTOCOLS, response.status());
+        response.release();
+        assertNotNull(WebSocketServerProtocolHandler.getHandshaker(handshakerCtx.channel()));
     }
 
     @Test
@@ -63,10 +66,15 @@ public class WebSocketServerProtocolHandlerTest {
         EmbeddedChannel ch = createChannel();
 
         writeUpgradeRequest(ch);
-        assertEquals(SWITCHING_PROTOCOLS, ReferenceCountUtil.releaseLater(responses.remove()).getStatus());
+
+        FullHttpResponse response = responses.remove();
+        assertEquals(SWITCHING_PROTOCOLS, response.status());
+        response.release();
 
         ch.writeInbound(new DefaultFullHttpRequest(HTTP_1_1, HttpMethod.GET, "/test"));
-        assertEquals(FORBIDDEN, ReferenceCountUtil.releaseLater(responses.remove()).getStatus());
+        response = responses.remove();
+        assertEquals(FORBIDDEN, response.status());
+        response.release();
     }
 
     @Test
@@ -82,9 +90,10 @@ public class WebSocketServerProtocolHandlerTest {
 
         ch.writeInbound(httpRequestWithEntity);
 
-        FullHttpResponse response = ReferenceCountUtil.releaseLater(responses.remove());
-        assertEquals(BAD_REQUEST, response.getStatus());
+        FullHttpResponse response = responses.remove();
+        assertEquals(BAD_REQUEST, response.status());
         assertEquals("not a WebSocket handshake request: missing upgrade", getResponseMessage(response));
+        response.release();
     }
 
     @Test
@@ -95,15 +104,16 @@ public class WebSocketServerProtocolHandlerTest {
                 .uri("/test")
                 .key(null)
                 .connection("Upgrade")
-                .upgrade(WEBSOCKET.toLowerCase())
+                .upgrade(HttpHeaderValues.WEBSOCKET)
                 .version13()
                 .build();
 
         ch.writeInbound(httpRequest);
 
-        FullHttpResponse response = ReferenceCountUtil.releaseLater(responses.remove());
-        assertEquals(BAD_REQUEST, response.getStatus());
+        FullHttpResponse response = responses.remove();
+        assertEquals(BAD_REQUEST, response.status());
         assertEquals("not a WebSocket request: missing key", getResponseMessage(response));
+        response.release();
     }
 
     @Test
@@ -114,7 +124,7 @@ public class WebSocketServerProtocolHandlerTest {
 
         if (ch.pipeline().context(HttpRequestDecoder.class) != null) {
             // Removing the HttpRequestDecoder because we are writing a TextWebSocketFrame and thus
-            // decoding is not neccessary.
+            // decoding is not necessary.
             ch.pipeline().remove(HttpRequestDecoder.class);
         }
 
@@ -137,7 +147,7 @@ public class WebSocketServerProtocolHandlerTest {
     }
 
     private static void writeUpgradeRequest(EmbeddedChannel ch) {
-        ch.writeInbound(WebSocketRequestBuilder.sucessful());
+        ch.writeInbound(WebSocketRequestBuilder.successful());
     }
 
     private static String getResponseMessage(FullHttpResponse response) {

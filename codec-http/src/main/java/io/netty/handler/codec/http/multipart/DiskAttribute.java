@@ -22,7 +22,7 @@ import io.netty.handler.codec.http.HttpConstants;
 import java.io.IOException;
 import java.nio.charset.Charset;
 
-import static io.netty.buffer.Unpooled.*;
+import static io.netty.buffer.Unpooled.wrappedBuffer;
 
 /**
  * Disk implementation of Attributes
@@ -43,8 +43,16 @@ public class DiskAttribute extends AbstractDiskHttpData implements Attribute {
         this(name, HttpConstants.DEFAULT_CHARSET);
     }
 
+    public DiskAttribute(String name, long definedSize) {
+        this(name, definedSize, HttpConstants.DEFAULT_CHARSET);
+    }
+
     public DiskAttribute(String name, Charset charset) {
         super(name, charset, 0);
+    }
+
+    public DiskAttribute(String name, long definedSize, Charset charset) {
+        super(name, charset, definedSize);
     }
 
     public DiskAttribute(String name, String value) throws IOException {
@@ -83,13 +91,14 @@ public class DiskAttribute extends AbstractDiskHttpData implements Attribute {
 
     @Override
     public void addContent(ByteBuf buffer, boolean last) throws IOException {
-        int localsize = buffer.readableBytes();
-        checkSize(size + localsize);
-        if (definedSize > 0 && definedSize < size + localsize) {
-            definedSize = size + localsize;
+        final long newDefinedSize = size + buffer.readableBytes();
+        checkSize(newDefinedSize);
+        if (definedSize > 0 && definedSize < newDefinedSize) {
+            definedSize = newDefinedSize;
         }
         super.addContent(buffer, last);
     }
+
     @Override
     public int hashCode() {
         return getName().hashCode();
@@ -153,27 +162,43 @@ public class DiskAttribute extends AbstractDiskHttpData implements Attribute {
 
     @Override
     public Attribute copy() {
-        DiskAttribute attr = new DiskAttribute(getName());
-        attr.setCharset(getCharset());
-        ByteBuf content = content();
-        if (content != null) {
-            try {
-                attr.setContent(content.copy());
-            } catch (IOException e) {
-                throw new ChannelException(e);
-            }
-        }
-        return attr;
+        final ByteBuf content = content();
+        return replace(content != null ? content.copy() : null);
     }
 
     @Override
     public Attribute duplicate() {
-        DiskAttribute attr = new DiskAttribute(getName());
-        attr.setCharset(getCharset());
+        final ByteBuf content = content();
+        return replace(content != null ? content.duplicate() : null);
+    }
+
+    @Override
+    public Attribute retainedDuplicate() {
         ByteBuf content = content();
         if (content != null) {
+            content = content.retainedDuplicate();
+            boolean success = false;
             try {
-                attr.setContent(content.duplicate());
+                Attribute duplicate = replace(content);
+                success = true;
+                return duplicate;
+            } finally {
+                if (!success) {
+                    content.release();
+                }
+            }
+        } else {
+            return replace(null);
+        }
+    }
+
+    @Override
+    public Attribute replace(ByteBuf content) {
+        DiskAttribute attr = new DiskAttribute(getName());
+        attr.setCharset(getCharset());
+        if (content != null) {
+            try {
+                attr.setContent(content);
             } catch (IOException e) {
                 throw new ChannelException(e);
             }

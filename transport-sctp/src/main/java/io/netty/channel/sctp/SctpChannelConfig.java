@@ -18,8 +18,10 @@ package io.netty.channel.sctp;
 import com.sun.nio.sctp.SctpStandardSocketOptions.InitMaxStreams;
 import io.netty.buffer.ByteBufAllocator;
 import io.netty.channel.ChannelConfig;
+import io.netty.channel.ChannelOption;
 import io.netty.channel.MessageSizeEstimator;
 import io.netty.channel.RecvByteBufAllocator;
+import io.netty.channel.WriteBufferWaterMark;
 
 /**
  * A {@link ChannelConfig} for a {@link SctpChannel}.
@@ -33,11 +35,11 @@ import io.netty.channel.RecvByteBufAllocator;
  * <tr>
  * <th>Name</th><th>Associated setter method</th>
  * </tr><tr>
+ * <td>{@link ChannelOption#SO_RCVBUF}</td><td>{@link #setReceiveBufferSize(int)}</td>
+ * </tr><tr>
+ * <td>{@link ChannelOption#SO_SNDBUF}</td><td>{@link #setSendBufferSize(int)}</td>
+ * </tr><tr>
  * <td>{@link SctpChannelOption#SCTP_NODELAY}</td><td>{@link #setSctpNoDelay(boolean)}}</td>
- * </tr><tr>
- * <td>{@link SctpChannelOption#SO_RCVBUF}</td><td>{@link #setReceiveBufferSize(int)}</td>
- * </tr><tr>
- * <td>{@link SctpChannelOption#SO_SNDBUF}</td><td>{@link #setSendBufferSize(int)}</td>
  * </tr><tr>
  * <td>{@link SctpChannelOption#SCTP_INIT_MAXSTREAMS}</td><td>{@link #setInitMaxStreams(InitMaxStreams)}</td>
  * </tr>
@@ -101,6 +103,7 @@ public interface SctpChannelConfig extends ChannelConfig {
     SctpChannelConfig setConnectTimeoutMillis(int connectTimeoutMillis);
 
     @Override
+    @Deprecated
     SctpChannelConfig setMaxMessagesPerRead(int maxMessagesPerRead);
 
     @Override
@@ -123,6 +126,9 @@ public interface SctpChannelConfig extends ChannelConfig {
 
     @Override
     SctpChannelConfig setWriteBufferLowWaterMark(int writeBufferLowWaterMark);
+
+    @Override
+    SctpChannelConfig setWriteBufferWaterMark(WriteBufferWaterMark writeBufferWaterMark);
 
     @Override
     SctpChannelConfig setMessageSizeEstimator(MessageSizeEstimator estimator);

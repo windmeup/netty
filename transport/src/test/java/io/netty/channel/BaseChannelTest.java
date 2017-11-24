@@ -16,25 +16,25 @@
 package io.netty.channel;
 
 
-import static org.junit.Assert.assertEquals;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.local.LocalChannel;
-import io.netty.channel.local.LocalEventLoopGroup;
 import io.netty.channel.local.LocalServerChannel;
+
+import static org.junit.Assert.*;
 
 class BaseChannelTest {
 
     private final LoggingHandler loggingHandler;
 
     BaseChannelTest() {
-        this.loggingHandler = new LoggingHandler();
+        loggingHandler = new LoggingHandler();
     }
 
     ServerBootstrap getLocalServerBootstrap() {
-        EventLoopGroup serverGroup = new LocalEventLoopGroup();
+        EventLoopGroup serverGroup = new DefaultEventLoopGroup();
         ServerBootstrap sb = new ServerBootstrap();
         sb.group(serverGroup);
         sb.channel(LocalServerChannel.class);
@@ -48,12 +48,12 @@ class BaseChannelTest {
     }
 
     Bootstrap getLocalClientBootstrap() {
-        EventLoopGroup clientGroup = new LocalEventLoopGroup();
+        EventLoopGroup clientGroup = new DefaultEventLoopGroup();
         Bootstrap cb = new Bootstrap();
         cb.channel(LocalChannel.class);
         cb.group(clientGroup);
 
-        cb.handler(this.loggingHandler);
+        cb.handler(loggingHandler);
 
         return cb;
     }
@@ -64,17 +64,27 @@ class BaseChannelTest {
         return buf;
     }
 
-    void assertLog(String expected) {
-        String actual = this.loggingHandler.getLog();
-        assertEquals(expected, actual);
+    void assertLog(String firstExpected, String... otherExpected) {
+        String actual = loggingHandler.getLog();
+        if (firstExpected.equals(actual)) {
+            return;
+        }
+        for (String e: otherExpected) {
+            if (e.equals(actual)) {
+                return;
+            }
+        }
+
+        // Let the comparison fail with the first expectation.
+        assertEquals(firstExpected, actual);
     }
 
     void clearLog() {
-        this.loggingHandler.clear();
+        loggingHandler.clear();
     }
 
     void setInterest(LoggingHandler.Event... events) {
-        this.loggingHandler.setInterest(events);
+        loggingHandler.setInterest(events);
     }
 
 }

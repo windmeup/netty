@@ -90,8 +90,8 @@ public class XmlFrameDecoder extends ByteToMessageDecoder {
 
         if (bufferLength > maxFrameLength) {
             // bufferLength exceeded maxFrameLength; dropping frame
-            fail(ctx, bufferLength);
             in.skipBytes(in.readableBytes());
+            fail(bufferLength);
             return;
         }
 
@@ -111,8 +111,16 @@ public class XmlFrameDecoder extends ByteToMessageDecoder {
                 if (i < bufferLength - 1) {
                     final byte peekAheadByte = in.getByte(i + 1);
                     if (peekAheadByte == '/') {
-                        // found </, decrementing openBracketsCount
-                        openBracketsCount--;
+                        // found </, we must check if it is enclosed
+                        int peekFurtherAheadIndex = i + 2;
+                        while (peekFurtherAheadIndex <= bufferLength - 1) {
+                            //if we have </ and enclosing > we can decrement openBracketsCount
+                            if (in.getByte(peekFurtherAheadIndex) == '>') {
+                                openBracketsCount--;
+                                break;
+                            }
+                            peekFurtherAheadIndex++;
+                        }
                     } else if (isValidStartCharForXmlElement(peekAheadByte)) {
                         atLeastOneXmlElementFound = true;
                         // char after < is a valid xml element start char,
@@ -166,27 +174,26 @@ public class XmlFrameDecoder extends ByteToMessageDecoder {
         }
 
         final int readerIndex = in.readerIndex();
+        int xmlElementLength = length - readerIndex;
 
-        if (openBracketsCount == 0 && length > 0) {
-            if (length >= bufferLength) {
-                length = in.readableBytes();
+        if (openBracketsCount == 0 && xmlElementLength > 0) {
+            if (readerIndex + xmlElementLength >= bufferLength) {
+                xmlElementLength = in.readableBytes();
             }
             final ByteBuf frame =
-                    extractFrame(in, readerIndex + leadingWhiteSpaceCount, length - leadingWhiteSpaceCount);
-            in.skipBytes(length);
+                    extractFrame(in, readerIndex + leadingWhiteSpaceCount, xmlElementLength - leadingWhiteSpaceCount);
+            in.skipBytes(xmlElementLength);
             out.add(frame);
         }
     }
 
-    private void fail(ChannelHandlerContext ctx, long frameLength) {
+    private void fail(long frameLength) {
         if (frameLength > 0) {
-            ctx.fireExceptionCaught(
-                    new TooLongFrameException(
-                            "frame length exceeds " + maxFrameLength + ": " + frameLength + " - discarded"));
+            throw new TooLongFrameException(
+                            "frame length exceeds " + maxFrameLength + ": " + frameLength + " - discarded");
         } else {
-            ctx.fireExceptionCaught(
-                    new TooLongFrameException(
-                            "frame length exceeds " + maxFrameLength + " - discarding"));
+            throw new TooLongFrameException(
+                            "frame length exceeds " + maxFrameLength + " - discarding");
         }
     }
 

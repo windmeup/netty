@@ -18,7 +18,8 @@ package io.netty.test.udt.util;
 
 import com.barchart.udt.SocketUDT;
 import com.barchart.udt.StatusUDT;
-import io.netty.util.internal.ThreadLocalRandom;
+import io.netty.util.internal.PlatformDependent;
+import io.netty.util.internal.SocketUtils;
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
 
@@ -87,9 +88,7 @@ public final class UnitHelp {
 
         final long timeFinish = System.currentTimeMillis();
 
-        final long timeDiff = timeFinish - timeStart;
-
-        return timeDiff;
+        return timeFinish - timeStart;
     }
 
     /**
@@ -108,11 +107,11 @@ public final class UnitHelp {
             final String host) {
         ServerSocket socket = null;
         try {
-            final InetAddress address = InetAddress.getByName(host);
+            final InetAddress address = SocketUtils.addressByName(host);
             socket = new ServerSocket(0, 3, address);
             return (InetSocketAddress) socket.getLocalSocketAddress();
         } catch (final Exception e) {
-            log.error("Failed to find addess.");
+            log.error("Failed to find address.");
             return null;
         } finally {
             if (socket != null) {
@@ -193,11 +192,11 @@ public final class UnitHelp {
      * Display current OS/ARCH.
      */
     public static void logOsArch() {
-        final StringBuilder text = new StringBuilder(1024);
-        text.append("\n\t");
-        text.append(System.getProperty("os.name"));
-        text.append("\n\t");
-        text.append(System.getProperty("os.arch"));
+        final StringBuilder text = new StringBuilder(1024)
+            .append("\n\t")
+            .append(System.getProperty("os.name"))
+            .append("\n\t")
+            .append(System.getProperty("os.arch"));
         log.info("\n\t[os/arch]{}", text);
     }
 
@@ -205,7 +204,7 @@ public final class UnitHelp {
      * Display contents of a set.
      */
     public static void logSet(final Set<?> set) {
-        @SuppressWarnings({ "rawtypes", "unchecked" })
+        @SuppressWarnings("unchecked")
         final TreeSet<?> treeSet = new TreeSet(set);
         for (final Object item : treeSet) {
             log.info("-> {}", item);
@@ -223,7 +222,7 @@ public final class UnitHelp {
 
     public static int[] randomIntArray(final int length, final int range) {
         final int[] array = new int[length];
-        final Random generator = ThreadLocalRandom.current();
+        final Random generator = PlatformDependent.threadLocalRandom();
         for (int i = 0; i < array.length; i++) {
             array[i] = generator.nextInt(range);
         }

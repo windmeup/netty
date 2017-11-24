@@ -82,7 +82,7 @@ public class ThreadPerChannelEventLoopGroupTest {
         ChannelGroup channelGroup = new DefaultChannelGroup(testExecutor);
         while (taskCount-- > 0) {
             Channel channel = new EmbeddedChannel(NOOP_HANDLER);
-            loopGroup.register(channel, new DefaultChannelPromise(channel, testExecutor));
+            loopGroup.register(new DefaultChannelPromise(channel, testExecutor));
             channelGroup.add(channel);
         }
         channelGroup.close().sync();
@@ -92,7 +92,7 @@ public class ThreadPerChannelEventLoopGroupTest {
 
     private static class TestEventExecutor extends SingleThreadEventExecutor {
 
-        public TestEventExecutor() {
+        TestEventExecutor() {
             super(null, new DefaultThreadFactory("test"), false);
         }
 

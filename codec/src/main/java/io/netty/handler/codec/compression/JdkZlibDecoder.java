@@ -18,13 +18,11 @@ package io.netty.handler.codec.compression;
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelHandlerContext;
 
-import java.nio.ByteOrder;
 import java.util.List;
 import java.util.zip.CRC32;
 import java.util.zip.DataFormatException;
 import java.util.zip.Deflater;
 import java.util.zip.Inflater;
-
 
 /**
  * Decompress a {@link ByteBuf} using the inflate algorithm.
@@ -36,11 +34,11 @@ public class JdkZlibDecoder extends ZlibDecoder {
     private static final int FCOMMENT = 0x10;
     private static final int FRESERVED = 0xE0;
 
-    private final Inflater inflater;
+    private Inflater inflater;
     private final byte[] dictionary;
 
     // GZIP related
-    private final CRC32 crc;
+    private final ByteBufChecksum crc;
 
     private enum GzipState {
         HEADER_START,
@@ -58,6 +56,8 @@ public class JdkZlibDecoder extends ZlibDecoder {
     private int xlen = -1;
 
     private volatile boolean finished;
+
+    private boolean decideZlibOrNone;
 
     /**
      * Creates a new instance with the default wrapper ({@link ZlibWrapper#ZLIB}).
@@ -91,7 +91,7 @@ public class JdkZlibDecoder extends ZlibDecoder {
         switch (wrapper) {
             case GZIP:
                 inflater = new Inflater(true);
-                crc = new CRC32();
+                crc = ByteBufChecksum.wrapChecksum(new CRC32());
                 break;
             case NONE:
                 inflater = new Inflater(true);
@@ -99,6 +99,11 @@ public class JdkZlibDecoder extends ZlibDecoder {
                 break;
             case ZLIB:
                 inflater = new Inflater();
+                crc = null;
+                break;
+            case ZLIB_OR_NONE:
+                // Postpone the decision until decode(...) is called.
+                decideZlibOrNone = true;
                 crc = null;
                 break;
             default:
@@ -120,8 +125,20 @@ public class JdkZlibDecoder extends ZlibDecoder {
             return;
         }
 
-        if (!in.isReadable()) {
+        int readableBytes = in.readableBytes();
+        if (readableBytes == 0) {
             return;
+        }
+
+        if (decideZlibOrNone) {
+            // First two bytes are needed to decide if it's a ZLIB stream.
+            if (readableBytes < 2) {
+                return;
+            }
+
+            boolean nowrap = !looksLikeZlib(in.getShort(in.readerIndex()));
+            inflater = new Inflater(nowrap);
+            decideZlibOrNone = false;
         }
 
         if (crc != null) {
@@ -138,37 +155,28 @@ public class JdkZlibDecoder extends ZlibDecoder {
                         }
                     }
             }
+            // Some bytes may have been consumed, and so we must re-set the number of readable bytes.
+            readableBytes = in.readableBytes();
         }
 
-        int readableBytes = in.readableBytes();
         if (in.hasArray()) {
-            inflater.setInput(in.array(), in.arrayOffset() + in.readerIndex(), in.readableBytes());
+            inflater.setInput(in.array(), in.arrayOffset() + in.readerIndex(), readableBytes);
         } else {
-            byte[] array = new byte[in.readableBytes()];
+            byte[] array = new byte[readableBytes];
             in.getBytes(in.readerIndex(), array);
             inflater.setInput(array);
         }
 
-        int maxOutputLength = inflater.getRemaining() << 1;
-        ByteBuf decompressed = ctx.alloc().heapBuffer(maxOutputLength);
+        ByteBuf decompressed = ctx.alloc().heapBuffer(inflater.getRemaining() << 1);
         try {
             boolean readFooter = false;
-            byte[] outArray = decompressed.array();
             while (!inflater.needsInput()) {
-                int outIndex = decompressed.arrayOffset() + decompressed.writerIndex();
-                int length = outArray.length - outIndex;
-
-                if (length == 0) {
-                    // completely filled the buffer allocate a new one and start to fill it
-                    out.add(decompressed);
-                    decompressed = ctx.alloc().heapBuffer(maxOutputLength);
-                    outArray = decompressed.array();
-                    continue;
-                }
-
-                int outputLength = inflater.inflate(outArray, outIndex, length);
+                byte[] outArray = decompressed.array();
+                int writerIndex = decompressed.writerIndex();
+                int outIndex = decompressed.arrayOffset() + writerIndex;
+                int outputLength = inflater.inflate(outArray, outIndex, decompressed.writableBytes());
                 if (outputLength > 0) {
-                    decompressed.writerIndex(decompressed.writerIndex() + outputLength);
+                    decompressed.writerIndex(writerIndex + outputLength);
                     if (crc != null) {
                         crc.update(outArray, outIndex, outputLength);
                     }
@@ -189,6 +197,8 @@ public class JdkZlibDecoder extends ZlibDecoder {
                         readFooter = true;
                     }
                     break;
+                } else {
+                    decompressed.ensureWritable(inflater.getRemaining() << 1);
                 }
             }
 
@@ -215,7 +225,9 @@ public class JdkZlibDecoder extends ZlibDecoder {
     @Override
     protected void handlerRemoved0(ChannelHandlerContext ctx) throws Exception {
         super.handlerRemoved0(ctx);
-        inflater.end();
+        if (inflater != null) {
+            inflater.end();
+        }
     }
 
     private boolean readGZIPHeader(ByteBuf in) {
@@ -229,14 +241,14 @@ public class JdkZlibDecoder extends ZlibDecoder {
                 int magic1 = in.readByte();
 
                 if (magic0 != 31) {
-                    throw new CompressionException("Input is not in the GZIP format");
+                    throw new DecompressionException("Input is not in the GZIP format");
                 }
                 crc.update(magic0);
                 crc.update(magic1);
 
                 int method = in.readUnsignedByte();
                 if (method != Deflater.DEFLATED) {
-                    throw new CompressionException("Unsupported compression method "
+                    throw new DecompressionException("Unsupported compression method "
                             + method + " in the GZIP header");
                 }
                 crc.update(method);
@@ -245,20 +257,19 @@ public class JdkZlibDecoder extends ZlibDecoder {
                 crc.update(flags);
 
                 if ((flags & FRESERVED) != 0) {
-                    throw new CompressionException(
+                    throw new DecompressionException(
                             "Reserved flags are set in the GZIP header");
                 }
 
                 // mtime (int)
-                crc.update(in.readByte());
-                crc.update(in.readByte());
-                crc.update(in.readByte());
-                crc.update(in.readByte());
+                crc.update(in, in.readerIndex(), 4);
+                in.skipBytes(4);
 
                 crc.update(in.readUnsignedByte()); // extra flags
                 crc.update(in.readUnsignedByte()); // operating system
 
                 gzipState = GzipState.FLG_READ;
+                // fall through
             case FLG_READ:
                 if ((flags & FEXTRA) != 0) {
                     if (in.readableBytes() < 2) {
@@ -272,16 +283,17 @@ public class JdkZlibDecoder extends ZlibDecoder {
                     xlen |= xlen1 << 8 | xlen2;
                 }
                 gzipState = GzipState.XLEN_READ;
+                // fall through
             case XLEN_READ:
                 if (xlen != -1) {
                     if (in.readableBytes() < xlen) {
                         return false;
                     }
-                    byte[] xtra = new byte[xlen];
-                    in.readBytes(xtra);
-                    crc.update(xtra);
+                    crc.update(in, in.readerIndex(), xlen);
+                    in.skipBytes(xlen);
                 }
                 gzipState = GzipState.SKIP_FNAME;
+                // fall through
             case SKIP_FNAME:
                 if ((flags & FNAME) != 0) {
                     if (!in.isReadable()) {
@@ -296,6 +308,7 @@ public class JdkZlibDecoder extends ZlibDecoder {
                     } while (in.isReadable());
                 }
                 gzipState = GzipState.SKIP_COMMENT;
+                // fall through
             case SKIP_COMMENT:
                 if ((flags & FCOMMENT) != 0) {
                     if (!in.isReadable()) {
@@ -310,6 +323,7 @@ public class JdkZlibDecoder extends ZlibDecoder {
                     } while (in.isReadable());
                 }
                 gzipState = GzipState.PROCESS_FHCRC;
+                // fall through
             case PROCESS_FHCRC:
                 if ((flags & FHCRC) != 0) {
                     if (in.readableBytes() < 4) {
@@ -319,6 +333,7 @@ public class JdkZlibDecoder extends ZlibDecoder {
                 }
                 crc.reset();
                 gzipState = GzipState.HEADER_END;
+                // fall through
             case HEADER_END:
                 return true;
             default:
@@ -340,7 +355,7 @@ public class JdkZlibDecoder extends ZlibDecoder {
         }
         int readLength = inflater.getTotalOut();
         if (dataLength != readLength) {
-            throw new CompressionException(
+            throw new DecompressionException(
                     "Number of bytes mismatch. Expected: " + dataLength + ", Got: " + readLength);
         }
         return true;
@@ -353,8 +368,20 @@ public class JdkZlibDecoder extends ZlibDecoder {
         }
         long readCrc = crc.getValue();
         if (crcValue != readCrc) {
-            throw new CompressionException(
-                    "CRC value missmatch. Expected: " + crcValue + ", Got: " + readCrc);
+            throw new DecompressionException(
+                    "CRC value mismatch. Expected: " + crcValue + ", Got: " + readCrc);
         }
+    }
+
+    /*
+     * Returns true if the cmf_flg parameter (think: first two bytes of a zlib stream)
+     * indicates that this is a zlib stream.
+     * <p>
+     * You can lookup the details in the ZLIB RFC:
+     * <a href="http://tools.ietf.org/html/rfc1950#section-2.2">RFC 1950</a>.
+     */
+    private static boolean looksLikeZlib(short cmf_flg) {
+        return (cmf_flg & 0x7800) == 0x7800 &&
+                cmf_flg % 31 == 0;
     }
 }

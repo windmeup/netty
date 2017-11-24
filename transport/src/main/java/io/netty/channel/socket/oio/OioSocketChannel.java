@@ -19,12 +19,15 @@ import io.netty.buffer.ByteBuf;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelException;
 import io.netty.channel.ChannelFuture;
+import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelPromise;
 import io.netty.channel.ConnectTimeoutException;
 import io.netty.channel.EventLoop;
 import io.netty.channel.oio.OioByteStreamChannel;
 import io.netty.channel.socket.ServerSocketChannel;
 import io.netty.channel.socket.SocketChannel;
+import io.netty.util.internal.SocketUtils;
+import io.netty.util.internal.UnstableApi;
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
 
@@ -37,11 +40,9 @@ import java.net.SocketTimeoutException;
 /**
  * A {@link SocketChannel} which is using Old-Blocking-IO
  */
-public class OioSocketChannel extends OioByteStreamChannel
-                              implements SocketChannel {
+public class OioSocketChannel extends OioByteStreamChannel implements SocketChannel {
 
-    private static final InternalLogger logger =
-            InternalLoggerFactory.getInstance(OioSocketChannel.class);
+    private static final InternalLogger logger = InternalLoggerFactory.getInstance(OioSocketChannel.class);
 
     private final Socket socket;
     private final OioSocketChannelConfig config;
@@ -115,18 +116,39 @@ public class OioSocketChannel extends OioByteStreamChannel
     }
 
     @Override
-    public boolean isInputShutdown() {
-        return super.isInputShutdown();
-    }
-
-    @Override
     public boolean isOutputShutdown() {
         return socket.isOutputShutdown() || !isActive();
     }
 
     @Override
+    public boolean isInputShutdown() {
+        return socket.isInputShutdown() || !isActive();
+    }
+
+    @Override
+    public boolean isShutdown() {
+        return socket.isInputShutdown() && socket.isOutputShutdown() || !isActive();
+    }
+
+    @UnstableApi
+    @Override
+    protected final void doShutdownOutput() throws Exception {
+        shutdownOutput0();
+    }
+
+    @Override
     public ChannelFuture shutdownOutput() {
         return shutdownOutput(newPromise());
+    }
+
+    @Override
+    public ChannelFuture shutdownInput() {
+        return shutdownInput(newPromise());
+    }
+
+    @Override
+    public ChannelFuture shutdown() {
+        return shutdown(newPromise());
     }
 
     @Override
@@ -136,30 +158,111 @@ public class OioSocketChannel extends OioByteStreamChannel
         }
         try {
             return super.doReadBytes(buf);
-        } catch (SocketTimeoutException e) {
+        } catch (SocketTimeoutException ignored) {
             return 0;
         }
     }
 
     @Override
-    public ChannelFuture shutdownOutput(final ChannelPromise future) {
+    public ChannelFuture shutdownOutput(final ChannelPromise promise) {
         EventLoop loop = eventLoop();
         if (loop.inEventLoop()) {
-            try {
-                socket.shutdownOutput();
-                future.setSuccess();
-            } catch (Throwable t) {
-                future.setFailure(t);
-            }
+            shutdownOutput0(promise);
         } else {
             loop.execute(new Runnable() {
                 @Override
                 public void run() {
-                    shutdownOutput(future);
+                    shutdownOutput0(promise);
                 }
             });
         }
-        return future;
+        return promise;
+    }
+
+    private void shutdownOutput0(ChannelPromise promise) {
+        try {
+            shutdownOutput0();
+            promise.setSuccess();
+        } catch (Throwable t) {
+            promise.setFailure(t);
+        }
+    }
+
+    private void shutdownOutput0() throws IOException {
+        socket.shutdownOutput();
+    }
+
+    @Override
+    public ChannelFuture shutdownInput(final ChannelPromise promise) {
+        EventLoop loop = eventLoop();
+        if (loop.inEventLoop()) {
+            shutdownInput0(promise);
+        } else {
+            loop.execute(new Runnable() {
+                @Override
+                public void run() {
+                    shutdownInput0(promise);
+                }
+            });
+        }
+        return promise;
+    }
+
+    private void shutdownInput0(ChannelPromise promise) {
+        try {
+            socket.shutdownInput();
+            promise.setSuccess();
+        } catch (Throwable t) {
+            promise.setFailure(t);
+        }
+    }
+
+    @Override
+    public ChannelFuture shutdown(final ChannelPromise promise) {
+        ChannelFuture shutdownOutputFuture = shutdownOutput();
+        if (shutdownOutputFuture.isDone()) {
+            shutdownOutputDone(shutdownOutputFuture, promise);
+        } else {
+            shutdownOutputFuture.addListener(new ChannelFutureListener() {
+                @Override
+                public void operationComplete(final ChannelFuture shutdownOutputFuture) throws Exception {
+                    shutdownOutputDone(shutdownOutputFuture, promise);
+                }
+            });
+        }
+        return promise;
+    }
+
+    private void shutdownOutputDone(final ChannelFuture shutdownOutputFuture, final ChannelPromise promise) {
+        ChannelFuture shutdownInputFuture = shutdownInput();
+        if (shutdownInputFuture.isDone()) {
+            shutdownDone(shutdownOutputFuture, shutdownInputFuture, promise);
+        } else {
+            shutdownInputFuture.addListener(new ChannelFutureListener() {
+                @Override
+                public void operationComplete(ChannelFuture shutdownInputFuture) throws Exception {
+                    shutdownDone(shutdownOutputFuture, shutdownInputFuture, promise);
+                }
+            });
+        }
+    }
+
+    private static void shutdownDone(ChannelFuture shutdownOutputFuture,
+                                     ChannelFuture shutdownInputFuture,
+                                     ChannelPromise promise) {
+        Throwable shutdownOutputCause = shutdownOutputFuture.cause();
+        Throwable shutdownInputCause = shutdownInputFuture.cause();
+        if (shutdownOutputCause != null) {
+            if (shutdownInputCause != null) {
+                logger.debug("Exception suppressed because a previous exception occurred.",
+                        shutdownInputCause);
+            }
+            promise.setFailure(shutdownOutputCause);
+        } else if (shutdownInputCause != null) {
+            promise.setFailure(shutdownInputCause);
+        } else {
+            promise.setSuccess();
+        }
     }
 
     @Override
@@ -184,19 +287,19 @@ public class OioSocketChannel extends OioByteStreamChannel
 
     @Override
     protected void doBind(SocketAddress localAddress) throws Exception {
-        socket.bind(localAddress);
+        SocketUtils.bind(socket, localAddress);
     }
 
     @Override
     protected void doConnect(SocketAddress remoteAddress,
             SocketAddress localAddress) throws Exception {
         if (localAddress != null) {
-            socket.bind(localAddress);
+            SocketUtils.bind(socket, localAddress);
         }
 
         boolean success = false;
         try {
-            socket.connect(remoteAddress, config().getConnectTimeoutMillis());
+            SocketUtils.connect(socket, remoteAddress, config().getConnectTimeoutMillis());
             activate(socket.getInputStream(), socket.getOutputStream());
             success = true;
         } catch (SocketTimeoutException e) {
@@ -220,7 +323,6 @@ public class OioSocketChannel extends OioByteStreamChannel
         socket.close();
     }
 
-    @Override
     protected boolean checkInputShutdown() {
         if (isInputShutdown()) {
             try {
@@ -231,5 +333,15 @@ public class OioSocketChannel extends OioByteStreamChannel
             return true;
         }
         return false;
+    }
+
+    @Deprecated
+    @Override
+    protected void setReadPending(boolean readPending) {
+        super.setReadPending(readPending);
+    }
+
+    final void clearReadPending0() {
+        clearReadPending();
     }
 }

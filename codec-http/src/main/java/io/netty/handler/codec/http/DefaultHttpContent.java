@@ -42,12 +42,22 @@ public class DefaultHttpContent extends DefaultHttpObject implements HttpContent
 
     @Override
     public HttpContent copy() {
-        return new DefaultHttpContent(content.copy());
+        return replace(content.copy());
     }
 
     @Override
     public HttpContent duplicate() {
-        return new DefaultHttpContent(content.duplicate());
+        return replace(content.duplicate());
+    }
+
+    @Override
+    public HttpContent retainedDuplicate() {
+        return replace(content.retainedDuplicate());
+    }
+
+    @Override
+    public HttpContent replace(ByteBuf content) {
+        return new DefaultHttpContent(content);
     }
 
     @Override
@@ -92,6 +102,6 @@ public class DefaultHttpContent extends DefaultHttpObject implements HttpContent
     @Override
     public String toString() {
         return StringUtil.simpleClassName(this) +
-               "(data: " + content() + ", decoderResult: " + getDecoderResult() + ')';
+               "(data: " + content() + ", decoderResult: " + decoderResult() + ')';
     }
 }

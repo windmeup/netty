@@ -15,7 +15,6 @@
  */
 package io.netty.buffer;
 
-import io.netty.util.ResourceLeak;
 import io.netty.util.internal.EmptyArrays;
 
 import java.io.IOException;
@@ -23,44 +22,55 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.channels.FileChannel;
 import java.nio.channels.GatheringByteChannel;
 import java.nio.channels.ScatteringByteChannel;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.ConcurrentModificationException;
 import java.util.Iterator;
 import java.util.List;
 import java.util.ListIterator;
+import java.util.NoSuchElementException;
+
+import static io.netty.util.internal.ObjectUtil.checkNotNull;
 
 /**
  * A virtual buffer which shows multiple buffers as a single merged buffer.  It is recommended to use
  * {@link ByteBufAllocator#compositeBuffer()} or {@link Unpooled#wrappedBuffer(ByteBuf...)} instead of calling the
  * constructor explicitly.
  */
-public class CompositeByteBuf extends AbstractReferenceCountedByteBuf {
+public class CompositeByteBuf extends AbstractReferenceCountedByteBuf implements Iterable<ByteBuf> {
 
-    private final ResourceLeak leak;
+    private static final ByteBuffer EMPTY_NIO_BUFFER = Unpooled.EMPTY_BUFFER.nioBuffer();
+    private static final Iterator<ByteBuf> EMPTY_ITERATOR = Collections.<ByteBuf>emptyList().iterator();
+
     private final ByteBufAllocator alloc;
     private final boolean direct;
-    private final List<Component> components = new ArrayList<Component>();
+    private final List<Component> components;
     private final int maxNumComponents;
-    private static final ByteBuffer FULL_BYTEBUFFER = (ByteBuffer) ByteBuffer.allocate(1).position(1);
 
     private boolean freed;
 
     public CompositeByteBuf(ByteBufAllocator alloc, boolean direct, int maxNumComponents) {
-        super(Integer.MAX_VALUE);
+        super(AbstractByteBufAllocator.DEFAULT_MAX_CAPACITY);
         if (alloc == null) {
             throw new NullPointerException("alloc");
         }
         this.alloc = alloc;
         this.direct = direct;
         this.maxNumComponents = maxNumComponents;
-        leak = leakDetector.open(this);
+        components = newList(maxNumComponents);
     }
 
     public CompositeByteBuf(ByteBufAllocator alloc, boolean direct, int maxNumComponents, ByteBuf... buffers) {
-        super(Integer.MAX_VALUE);
+        this(alloc, direct, maxNumComponents, buffers, 0, buffers.length);
+    }
+
+    CompositeByteBuf(
+            ByteBufAllocator alloc, boolean direct, int maxNumComponents, ByteBuf[] buffers, int offset, int len) {
+        super(AbstractByteBufAllocator.DEFAULT_MAX_CAPACITY);
         if (alloc == null) {
             throw new NullPointerException("alloc");
         }
@@ -72,16 +82,16 @@ public class CompositeByteBuf extends AbstractReferenceCountedByteBuf {
         this.alloc = alloc;
         this.direct = direct;
         this.maxNumComponents = maxNumComponents;
+        components = newList(maxNumComponents);
 
-        addComponents0(0, buffers);
+        addComponents0(false, 0, buffers, offset, len);
         consolidateIfNeeded();
         setIndex(0, capacity());
-        leak = leakDetector.open(this);
     }
 
     public CompositeByteBuf(
             ByteBufAllocator alloc, boolean direct, int maxNumComponents, Iterable<ByteBuf> buffers) {
-        super(Integer.MAX_VALUE);
+        super(AbstractByteBufAllocator.DEFAULT_MAX_CAPACITY);
         if (alloc == null) {
             throw new NullPointerException("alloc");
         }
@@ -93,149 +103,240 @@ public class CompositeByteBuf extends AbstractReferenceCountedByteBuf {
         this.alloc = alloc;
         this.direct = direct;
         this.maxNumComponents = maxNumComponents;
-        addComponents0(0, buffers);
+        components = newList(maxNumComponents);
+
+        addComponents0(false, 0, buffers);
         consolidateIfNeeded();
         setIndex(0, capacity());
-        leak = leakDetector.open(this);
+    }
+
+    private static List<Component> newList(int maxNumComponents) {
+        return new ArrayList<Component>(Math.min(AbstractByteBufAllocator.DEFAULT_MAX_COMPONENTS, maxNumComponents));
+    }
+
+    // Special constructor used by WrappedCompositeByteBuf
+    CompositeByteBuf(ByteBufAllocator alloc) {
+        super(Integer.MAX_VALUE);
+        this.alloc = alloc;
+        direct = false;
+        maxNumComponents = 0;
+        components = Collections.emptyList();
     }
 
     /**
      * Add the given {@link ByteBuf}.
-     *
+     * <p>
      * Be aware that this method does not increase the {@code writerIndex} of the {@link CompositeByteBuf}.
-     * If you need to have it increased you need to handle it by your own.
-     *
-     * @param buffer the {@link ByteBuf} to add
+     * If you need to have it increased use {@link #addComponent(boolean, ByteBuf)}.
+     * <p>
+     * {@link ByteBuf#release()} ownership of {@code buffer} is transfered to this {@link CompositeByteBuf}.
+     * @param buffer the {@link ByteBuf} to add. {@link ByteBuf#release()} ownership is transfered to this
+     * {@link CompositeByteBuf}.
      */
     public CompositeByteBuf addComponent(ByteBuf buffer) {
-        addComponent0(components.size(), buffer);
-        consolidateIfNeeded();
-        return this;
+        return addComponent(false, buffer);
     }
 
     /**
      * Add the given {@link ByteBuf}s.
-     *
+     * <p>
      * Be aware that this method does not increase the {@code writerIndex} of the {@link CompositeByteBuf}.
-     * If you need to have it increased you need to handle it by your own.
-     *
-     * @param buffers the {@link ByteBuf}s to add
+     * If you need to have it increased use {@link #addComponents(boolean, ByteBuf[])}.
+     * <p>
+     * {@link ByteBuf#release()} ownership of all {@link ByteBuf} objects in {@code buffers} is transfered to this
+     * {@link CompositeByteBuf}.
+     * @param buffers the {@link ByteBuf}s to add. {@link ByteBuf#release()} ownership of all {@link ByteBuf#release()}
+     * ownership of all {@link ByteBuf} objects is transfered to this {@link CompositeByteBuf}.
      */
     public CompositeByteBuf addComponents(ByteBuf... buffers) {
-        addComponents0(components.size(), buffers);
-        consolidateIfNeeded();
-        return this;
+        return addComponents(false, buffers);
     }
 
     /**
      * Add the given {@link ByteBuf}s.
-     *
+     * <p>
      * Be aware that this method does not increase the {@code writerIndex} of the {@link CompositeByteBuf}.
-     * If you need to have it increased you need to handle it by your own.
-     *
-     * @param buffers the {@link ByteBuf}s to add
+     * If you need to have it increased use {@link #addComponents(boolean, Iterable)}.
+     * <p>
+     * {@link ByteBuf#release()} ownership of all {@link ByteBuf} objects in {@code buffers} is transfered to this
+     * {@link CompositeByteBuf}.
+     * @param buffers the {@link ByteBuf}s to add. {@link ByteBuf#release()} ownership of all {@link ByteBuf#release()}
+     * ownership of all {@link ByteBuf} objects is transfered to this {@link CompositeByteBuf}.
      */
     public CompositeByteBuf addComponents(Iterable<ByteBuf> buffers) {
-        addComponents0(components.size(), buffers);
-        consolidateIfNeeded();
-        return this;
+        return addComponents(false, buffers);
     }
 
     /**
      * Add the given {@link ByteBuf} on the specific index.
-     *
+     * <p>
      * Be aware that this method does not increase the {@code writerIndex} of the {@link CompositeByteBuf}.
-     * If you need to have it increased you need to handle it by your own.
-     *
-     * @param cIndex the index on which the {@link ByteBuf} will be added
-     * @param buffer the {@link ByteBuf} to add
+     * If you need to have it increased use {@link #addComponent(boolean, int, ByteBuf)}.
+     * <p>
+     * {@link ByteBuf#release()} ownership of {@code buffer} is transfered to this {@link CompositeByteBuf}.
+     * @param cIndex the index on which the {@link ByteBuf} will be added.
+     * @param buffer the {@link ByteBuf} to add. {@link ByteBuf#release()} ownership is transfered to this
+     * {@link CompositeByteBuf}.
      */
     public CompositeByteBuf addComponent(int cIndex, ByteBuf buffer) {
-        addComponent0(cIndex, buffer);
+        return addComponent(false, cIndex, buffer);
+    }
+
+    /**
+     * Add the given {@link ByteBuf} and increase the {@code writerIndex} if {@code increaseWriterIndex} is
+     * {@code true}.
+     *
+     * {@link ByteBuf#release()} ownership of {@code buffer} is transfered to this {@link CompositeByteBuf}.
+     * @param buffer the {@link ByteBuf} to add. {@link ByteBuf#release()} ownership is transfered to this
+     * {@link CompositeByteBuf}.
+     */
+    public CompositeByteBuf addComponent(boolean increaseWriterIndex, ByteBuf buffer) {
+        checkNotNull(buffer, "buffer");
+        addComponent0(increaseWriterIndex, components.size(), buffer);
         consolidateIfNeeded();
         return this;
     }
 
-    private int addComponent0(int cIndex, ByteBuf buffer) {
-        checkComponentIndex(cIndex);
+    /**
+     * Add the given {@link ByteBuf}s and increase the {@code writerIndex} if {@code increaseWriterIndex} is
+     * {@code true}.
+     *
+     * {@link ByteBuf#release()} ownership of all {@link ByteBuf} objects in {@code buffers} is transfered to this
+     * {@link CompositeByteBuf}.
+     * @param buffers the {@link ByteBuf}s to add. {@link ByteBuf#release()} ownership of all {@link ByteBuf#release()}
+     * ownership of all {@link ByteBuf} objects is transfered to this {@link CompositeByteBuf}.
+     */
+    public CompositeByteBuf addComponents(boolean increaseWriterIndex, ByteBuf... buffers) {
+        addComponents0(increaseWriterIndex, components.size(), buffers, 0, buffers.length);
+        consolidateIfNeeded();
+        return this;
+    }
 
-        if (buffer == null) {
-            throw new NullPointerException("buffer");
-        }
+    /**
+     * Add the given {@link ByteBuf}s and increase the {@code writerIndex} if {@code increaseWriterIndex} is
+     * {@code true}.
+     *
+     * {@link ByteBuf#release()} ownership of all {@link ByteBuf} objects in {@code buffers} is transfered to this
+     * {@link CompositeByteBuf}.
+     * @param buffers the {@link ByteBuf}s to add. {@link ByteBuf#release()} ownership of all {@link ByteBuf#release()}
+     * ownership of all {@link ByteBuf} objects is transfered to this {@link CompositeByteBuf}.
+     */
+    public CompositeByteBuf addComponents(boolean increaseWriterIndex, Iterable<ByteBuf> buffers) {
+        addComponents0(increaseWriterIndex, components.size(), buffers);
+        consolidateIfNeeded();
+        return this;
+    }
 
-        int readableBytes = buffer.readableBytes();
-        if (readableBytes == 0) {
-            return cIndex;
-        }
+    /**
+     * Add the given {@link ByteBuf} on the specific index and increase the {@code writerIndex}
+     * if {@code increaseWriterIndex} is {@code true}.
+     *
+     * {@link ByteBuf#release()} ownership of {@code buffer} is transfered to this {@link CompositeByteBuf}.
+     * @param cIndex the index on which the {@link ByteBuf} will be added.
+     * @param buffer the {@link ByteBuf} to add. {@link ByteBuf#release()} ownership is transfered to this
+     * {@link CompositeByteBuf}.
+     */
+    public CompositeByteBuf addComponent(boolean increaseWriterIndex, int cIndex, ByteBuf buffer) {
+        checkNotNull(buffer, "buffer");
+        addComponent0(increaseWriterIndex, cIndex, buffer);
+        consolidateIfNeeded();
+        return this;
+    }
 
-        // No need to consolidate - just add a component to the list.
-        Component c = new Component(buffer.order(ByteOrder.BIG_ENDIAN).slice());
-        if (cIndex == components.size()) {
-            components.add(c);
-            if (cIndex == 0) {
-                c.endOffset = readableBytes;
+    /**
+     * Precondition is that {@code buffer != null}.
+     */
+    private int addComponent0(boolean increaseWriterIndex, int cIndex, ByteBuf buffer) {
+        assert buffer != null;
+        boolean wasAdded = false;
+        try {
+            checkComponentIndex(cIndex);
+
+            int readableBytes = buffer.readableBytes();
+
+            // No need to consolidate - just add a component to the list.
+            @SuppressWarnings("deprecation")
+            Component c = new Component(buffer.order(ByteOrder.BIG_ENDIAN).slice());
+            if (cIndex == components.size()) {
+                wasAdded = components.add(c);
+                if (cIndex == 0) {
+                    c.endOffset = readableBytes;
+                } else {
+                    Component prev = components.get(cIndex - 1);
+                    c.offset = prev.endOffset;
+                    c.endOffset = c.offset + readableBytes;
+                }
             } else {
-                Component prev = components.get(cIndex - 1);
-                c.offset = prev.endOffset;
-                c.endOffset = c.offset + readableBytes;
+                components.add(cIndex, c);
+                wasAdded = true;
+                if (readableBytes != 0) {
+                    updateComponentOffsets(cIndex);
+                }
             }
-        } else {
-            components.add(cIndex, c);
-            updateComponentOffsets(cIndex);
+            if (increaseWriterIndex) {
+                writerIndex(writerIndex() + buffer.readableBytes());
+            }
+            return cIndex;
+        } finally {
+            if (!wasAdded) {
+                buffer.release();
+            }
         }
-        return cIndex;
     }
 
     /**
      * Add the given {@link ByteBuf}s on the specific index
-     *
+     * <p>
      * Be aware that this method does not increase the {@code writerIndex} of the {@link CompositeByteBuf}.
      * If you need to have it increased you need to handle it by your own.
-     *
-     * @param cIndex the index on which the {@link ByteBuf} will be added.
-     * @param buffers the {@link ByteBuf}s to add
+     * <p>
+     * {@link ByteBuf#release()} ownership of all {@link ByteBuf} objects in {@code buffers} is transfered to this
+     * {@link CompositeByteBuf}.
+     * @param cIndex the index on which the {@link ByteBuf} will be added. {@link ByteBuf#release()} ownership of all
+     * {@link ByteBuf#release()} ownership of all {@link ByteBuf} objects is transfered to this
+     * {@link CompositeByteBuf}.
+     * @param buffers the {@link ByteBuf}s to add. {@link ByteBuf#release()} ownership of all {@link ByteBuf#release()}
+     * ownership of all {@link ByteBuf} objects is transfered to this {@link CompositeByteBuf}.
      */
     public CompositeByteBuf addComponents(int cIndex, ByteBuf... buffers) {
-        addComponents0(cIndex, buffers);
+        addComponents0(false, cIndex, buffers, 0, buffers.length);
         consolidateIfNeeded();
         return this;
     }
 
-    private int addComponents0(int cIndex, ByteBuf... buffers) {
-        checkComponentIndex(cIndex);
+    private int addComponents0(boolean increaseWriterIndex, int cIndex, ByteBuf[] buffers, int offset, int len) {
+        checkNotNull(buffers, "buffers");
+        int i = offset;
+        try {
+            checkComponentIndex(cIndex);
 
-        if (buffers == null) {
-            throw new NullPointerException("buffers");
-        }
-
-        int readableBytes = 0;
-        for (ByteBuf b: buffers) {
-            if (b == null) {
-                break;
-            }
-            readableBytes += b.readableBytes();
-        }
-
-        if (readableBytes == 0) {
-            return cIndex;
-        }
-
-        // No need for consolidation
-        for (ByteBuf b: buffers) {
-            if (b == null) {
-                break;
-            }
-            if (b.isReadable()) {
-                cIndex = addComponent0(cIndex, b) + 1;
+            // No need for consolidation
+            while (i < len) {
+                // Increment i now to prepare for the next iteration and prevent a duplicate release (addComponent0
+                // will release if an exception occurs, and we also release in the finally block here).
+                ByteBuf b = buffers[i++];
+                if (b == null) {
+                    break;
+                }
+                cIndex = addComponent0(increaseWriterIndex, cIndex, b) + 1;
                 int size = components.size();
                 if (cIndex > size) {
                     cIndex = size;
                 }
-            } else {
-                b.release();
+            }
+            return cIndex;
+        } finally {
+            for (; i < len; ++i) {
+                ByteBuf b = buffers[i];
+                if (b != null) {
+                    try {
+                        b.release();
+                    } catch (Throwable ignored) {
+                        // ignore
+                    }
+                }
             }
         }
-        return cIndex;
     }
 
     /**
@@ -243,36 +344,51 @@ public class CompositeByteBuf extends AbstractReferenceCountedByteBuf {
      *
      * Be aware that this method does not increase the {@code writerIndex} of the {@link CompositeByteBuf}.
      * If you need to have it increased you need to handle it by your own.
-     *
+     * <p>
+     * {@link ByteBuf#release()} ownership of all {@link ByteBuf} objects in {@code buffers} is transfered to this
+     * {@link CompositeByteBuf}.
      * @param cIndex the index on which the {@link ByteBuf} will be added.
-     * @param buffers the {@link ByteBuf}s to add
+     * @param buffers the {@link ByteBuf}s to add.  {@link ByteBuf#release()} ownership of all
+     * {@link ByteBuf#release()} ownership of all {@link ByteBuf} objects is transfered to this
+     * {@link CompositeByteBuf}.
      */
     public CompositeByteBuf addComponents(int cIndex, Iterable<ByteBuf> buffers) {
-        addComponents0(cIndex, buffers);
+        addComponents0(false, cIndex, buffers);
         consolidateIfNeeded();
         return this;
     }
 
-    private int addComponents0(int cIndex, Iterable<ByteBuf> buffers) {
-        if (buffers == null) {
-            throw new NullPointerException("buffers");
-        }
-
+    private int addComponents0(boolean increaseIndex, int cIndex, Iterable<ByteBuf> buffers) {
         if (buffers instanceof ByteBuf) {
             // If buffers also implements ByteBuf (e.g. CompositeByteBuf), it has to go to addComponent(ByteBuf).
-            return addComponent0(cIndex, (ByteBuf) buffers);
+            return addComponent0(increaseIndex, cIndex, (ByteBuf) buffers);
         }
+        checkNotNull(buffers, "buffers");
 
         if (!(buffers instanceof Collection)) {
             List<ByteBuf> list = new ArrayList<ByteBuf>();
-            for (ByteBuf b: buffers) {
-                list.add(b);
+            try {
+                for (ByteBuf b: buffers) {
+                    list.add(b);
+                }
+                buffers = list;
+            } finally {
+                if (buffers != list) {
+                    for (ByteBuf b: buffers) {
+                        if (b != null) {
+                            try {
+                                b.release();
+                            } catch (Throwable ignored) {
+                                // ignore
+                            }
+                        }
+                    }
+                }
             }
-            buffers = list;
         }
 
         Collection<ByteBuf> col = (Collection<ByteBuf>) buffers;
-        return addComponents0(cIndex, col.toArray(new ByteBuf[col.size()]));
+        return addComponents0(increaseIndex, cIndex, col.toArray(new ByteBuf[col.size()]), 0 , col.size());
     }
 
     /**
@@ -289,7 +405,6 @@ public class CompositeByteBuf extends AbstractReferenceCountedByteBuf {
             ByteBuf consolidated = allocBuffer(capacity);
 
             // We're not using foreach to avoid creating an iterator.
-            // noinspection ForLoopReplaceableByForEach
             for (int i = 0; i < numComponents; i ++) {
                 Component c = components.get(i);
                 ByteBuf b = c.buf;
@@ -304,7 +419,7 @@ public class CompositeByteBuf extends AbstractReferenceCountedByteBuf {
     }
 
     private void checkComponentIndex(int cIndex) {
-        assert !freed;
+        ensureAccessible();
         if (cIndex < 0 || cIndex > components.size()) {
             throw new IndexOutOfBoundsException(String.format(
                     "cIndex: %d (expected: >= 0 && <= numComponents(%d))",
@@ -313,7 +428,7 @@ public class CompositeByteBuf extends AbstractReferenceCountedByteBuf {
     }
 
     private void checkComponentIndex(int cIndex, int numComponents) {
-        assert !freed;
+        ensureAccessible();
         if (cIndex < 0 || cIndex + numComponents > components.size()) {
             throw new IndexOutOfBoundsException(String.format(
                     "cIndex: %d, numComponents: %d " +
@@ -350,8 +465,12 @@ public class CompositeByteBuf extends AbstractReferenceCountedByteBuf {
      */
     public CompositeByteBuf removeComponent(int cIndex) {
         checkComponentIndex(cIndex);
-        components.remove(cIndex).freeIfNecessary();
-        updateComponentOffsets(cIndex);
+        Component comp = components.remove(cIndex);
+        comp.freeIfNecessary();
+        if (comp.length > 0) {
+            // Only need to call updateComponentOffsets if the length was > 0
+            updateComponentOffsets(cIndex);
+        }
         return this;
     }
 
@@ -364,23 +483,33 @@ public class CompositeByteBuf extends AbstractReferenceCountedByteBuf {
     public CompositeByteBuf removeComponents(int cIndex, int numComponents) {
         checkComponentIndex(cIndex, numComponents);
 
+        if (numComponents == 0) {
+            return this;
+        }
         List<Component> toRemove = components.subList(cIndex, cIndex + numComponents);
+        boolean needsUpdate = false;
         for (Component c: toRemove) {
+            if (c.length > 0) {
+                needsUpdate = true;
+            }
             c.freeIfNecessary();
         }
         toRemove.clear();
 
-        updateComponentOffsets(cIndex);
+        if (needsUpdate) {
+            // Only need to call updateComponentOffsets if the length was > 0
+            updateComponentOffsets(cIndex);
+        }
         return this;
     }
 
+    @Override
     public Iterator<ByteBuf> iterator() {
-        assert !freed;
-        List<ByteBuf> list = new ArrayList<ByteBuf>(components.size());
-        for (Component c: components) {
-            list.add(c.buf);
+        ensureAccessible();
+        if (components.isEmpty()) {
+            return EMPTY_ITERATOR;
         }
-        return list.iterator();
+        return new CompositeByteBufIterator();
     }
 
     /**
@@ -444,58 +573,76 @@ public class CompositeByteBuf extends AbstractReferenceCountedByteBuf {
 
     @Override
     public boolean hasArray() {
-        if (components.size() == 1) {
+        switch (components.size()) {
+        case 0:
+            return true;
+        case 1:
             return components.get(0).buf.hasArray();
+        default:
+            return false;
         }
-        return false;
     }
 
     @Override
     public byte[] array() {
-        if (components.size() == 1) {
+        switch (components.size()) {
+        case 0:
+            return EmptyArrays.EMPTY_BYTES;
+        case 1:
             return components.get(0).buf.array();
+        default:
+            throw new UnsupportedOperationException();
         }
-        throw new UnsupportedOperationException();
     }
 
     @Override
     public int arrayOffset() {
-        if (components.size() == 1) {
+        switch (components.size()) {
+        case 0:
+            return 0;
+        case 1:
             return components.get(0).buf.arrayOffset();
+        default:
+            throw new UnsupportedOperationException();
         }
-        throw new UnsupportedOperationException();
     }
 
     @Override
     public boolean hasMemoryAddress() {
-        if (components.size() == 1) {
+        switch (components.size()) {
+        case 0:
+            return Unpooled.EMPTY_BUFFER.hasMemoryAddress();
+        case 1:
             return components.get(0).buf.hasMemoryAddress();
+        default:
+            return false;
         }
-        return false;
     }
 
     @Override
     public long memoryAddress() {
-        if (components.size() == 1) {
+        switch (components.size()) {
+        case 0:
+            return Unpooled.EMPTY_BUFFER.memoryAddress();
+        case 1:
             return components.get(0).buf.memoryAddress();
+        default:
+            throw new UnsupportedOperationException();
         }
-        throw new UnsupportedOperationException();
     }
 
     @Override
     public int capacity() {
-        if (components.isEmpty()) {
+        final int numComponents = components.size();
+        if (numComponents == 0) {
             return 0;
         }
-        return components.get(components.size() - 1).endOffset;
+        return components.get(numComponents - 1).endOffset;
     }
 
     @Override
     public CompositeByteBuf capacity(int newCapacity) {
-        assert !freed;
-        if (newCapacity < 0 || newCapacity > maxCapacity()) {
-            throw new IllegalArgumentException("newCapacity: " + newCapacity);
-        }
+        checkNewCapacity(newCapacity);
 
         int oldCapacity = capacity();
         if (newCapacity > oldCapacity) {
@@ -505,13 +652,13 @@ public class CompositeByteBuf extends AbstractReferenceCountedByteBuf {
             if (nComponents < maxNumComponents) {
                 padding = allocBuffer(paddingLength);
                 padding.setIndex(0, paddingLength);
-                addComponent0(components.size(), padding);
+                addComponent0(false, components.size(), padding);
             } else {
                 padding = allocBuffer(paddingLength);
                 padding.setIndex(0, paddingLength);
                 // FIXME: No need to create a padding buffer and consolidate.
                 // Just create a big single buffer and put the current content there.
-                addComponent0(components.size(), padding);
+                addComponent0(false, components.size(), padding);
                 consolidateIfNeeded();
             }
         } else if (newCapacity < oldCapacity) {
@@ -569,7 +716,6 @@ public class CompositeByteBuf extends AbstractReferenceCountedByteBuf {
      * Return the index for the given offset
      */
     public int toComponentIndex(int offset) {
-        assert !freed;
         checkIndex(offset);
 
         for (int low = 0, high = components.size(); low <= high;) {
@@ -616,6 +762,18 @@ public class CompositeByteBuf extends AbstractReferenceCountedByteBuf {
     }
 
     @Override
+    protected short _getShortLE(int index) {
+        Component c = findComponent(index);
+        if (index + 2 <= c.endOffset) {
+            return c.buf.getShortLE(index - c.offset);
+        } else if (order() == ByteOrder.BIG_ENDIAN) {
+            return (short) (_getByte(index) & 0xff | (_getByte(index + 1) & 0xff) << 8);
+        } else {
+            return (short) ((_getByte(index) & 0xff) << 8 | _getByte(index + 1) & 0xff);
+        }
+    }
+
+    @Override
     protected int _getUnsignedMedium(int index) {
         Component c = findComponent(index);
         if (index + 3 <= c.endOffset) {
@@ -624,6 +782,18 @@ public class CompositeByteBuf extends AbstractReferenceCountedByteBuf {
             return (_getShort(index) & 0xffff) << 8 | _getByte(index + 2) & 0xff;
         } else {
             return _getShort(index) & 0xFFFF | (_getByte(index + 2) & 0xFF) << 16;
+        }
+    }
+
+    @Override
+    protected int _getUnsignedMediumLE(int index) {
+        Component c = findComponent(index);
+        if (index + 3 <= c.endOffset) {
+            return c.buf.getUnsignedMediumLE(index - c.offset);
+        } else if (order() == ByteOrder.BIG_ENDIAN) {
+            return _getShortLE(index) & 0xffff | (_getByte(index + 2) & 0xff) << 16;
+        } else {
+            return (_getShortLE(index) & 0xffff) << 8 | _getByte(index + 2) & 0xff;
         }
     }
 
@@ -640,6 +810,18 @@ public class CompositeByteBuf extends AbstractReferenceCountedByteBuf {
     }
 
     @Override
+    protected int _getIntLE(int index) {
+        Component c = findComponent(index);
+        if (index + 4 <= c.endOffset) {
+            return c.buf.getIntLE(index - c.offset);
+        } else if (order() == ByteOrder.BIG_ENDIAN) {
+            return _getShortLE(index) & 0xffff | (_getShortLE(index + 2) & 0xffff) << 16;
+        } else {
+            return (_getShortLE(index) & 0xffff) << 16 | _getShortLE(index + 2) & 0xffff;
+        }
+    }
+
+    @Override
     protected long _getLong(int index) {
         Component c = findComponent(index);
         if (index + 8 <= c.endOffset) {
@@ -648,6 +830,18 @@ public class CompositeByteBuf extends AbstractReferenceCountedByteBuf {
             return (_getInt(index) & 0xffffffffL) << 32 | _getInt(index + 4) & 0xffffffffL;
         } else {
             return _getInt(index) & 0xFFFFFFFFL | (_getInt(index + 4) & 0xFFFFFFFFL) << 32;
+        }
+    }
+
+    @Override
+    protected long _getLongLE(int index) {
+        Component c = findComponent(index);
+        if (index + 8 <= c.endOffset) {
+            return c.buf.getLongLE(index - c.offset);
+        } else if (order() == ByteOrder.BIG_ENDIAN) {
+            return _getIntLE(index) & 0xffffffffL | (_getIntLE(index + 4) & 0xffffffffL) << 32;
+        } else {
+            return (_getIntLE(index) & 0xffffffffL) << 32 | _getIntLE(index + 4) & 0xffffffffL;
         }
     }
 
@@ -741,6 +935,24 @@ public class CompositeByteBuf extends AbstractReferenceCountedByteBuf {
     }
 
     @Override
+    public int getBytes(int index, FileChannel out, long position, int length)
+            throws IOException {
+        int count = nioBufferCount();
+        if (count == 1) {
+            return out.write(internalNioBuffer(index, length), position);
+        } else {
+            long writtenBytes = 0;
+            for (ByteBuffer buf : nioBuffers(index, length)) {
+                writtenBytes += out.write(buf, position + writtenBytes);
+            }
+            if (writtenBytes > Integer.MAX_VALUE) {
+                return Integer.MAX_VALUE;
+            }
+            return (int) writtenBytes;
+        }
+    }
+
+    @Override
     public CompositeByteBuf getBytes(int index, OutputStream out, int length) throws IOException {
         checkIndex(index, length);
         if (length == 0) {
@@ -793,6 +1005,20 @@ public class CompositeByteBuf extends AbstractReferenceCountedByteBuf {
     }
 
     @Override
+    protected void _setShortLE(int index, int value) {
+        Component c = findComponent(index);
+        if (index + 2 <= c.endOffset) {
+            c.buf.setShortLE(index - c.offset, value);
+        } else if (order() == ByteOrder.BIG_ENDIAN) {
+            _setByte(index, (byte) value);
+            _setByte(index + 1, (byte) (value >>> 8));
+        } else {
+            _setByte(index, (byte) (value >>> 8));
+            _setByte(index + 1, (byte) value);
+        }
+    }
+
+    @Override
     public CompositeByteBuf setMedium(int index, int value) {
         return (CompositeByteBuf) super.setMedium(index, value);
     }
@@ -808,6 +1034,20 @@ public class CompositeByteBuf extends AbstractReferenceCountedByteBuf {
         } else {
             _setShort(index, (short) value);
             _setByte(index + 2, (byte) (value >>> 16));
+        }
+    }
+
+    @Override
+    protected void _setMediumLE(int index, int value) {
+        Component c = findComponent(index);
+        if (index + 3 <= c.endOffset) {
+            c.buf.setMediumLE(index - c.offset, value);
+        } else if (order() == ByteOrder.BIG_ENDIAN) {
+            _setShortLE(index, (short) value);
+            _setByte(index + 2, (byte) (value >>> 16));
+        } else {
+            _setShortLE(index, (short) (value >> 8));
+            _setByte(index + 2, (byte) value);
         }
     }
 
@@ -831,6 +1071,20 @@ public class CompositeByteBuf extends AbstractReferenceCountedByteBuf {
     }
 
     @Override
+    protected void _setIntLE(int index, int value) {
+        Component c = findComponent(index);
+        if (index + 4 <= c.endOffset) {
+            c.buf.setIntLE(index - c.offset, value);
+        } else if (order() == ByteOrder.BIG_ENDIAN) {
+            _setShortLE(index, (short) value);
+            _setShortLE(index + 2, (short) (value >>> 16));
+        } else {
+            _setShortLE(index, (short) (value >>> 16));
+            _setShortLE(index + 2, (short) value);
+        }
+    }
+
+    @Override
     public CompositeByteBuf setLong(int index, long value) {
         return (CompositeByteBuf) super.setLong(index, value);
     }
@@ -846,6 +1100,20 @@ public class CompositeByteBuf extends AbstractReferenceCountedByteBuf {
         } else {
             _setInt(index, (int) value);
             _setInt(index + 4, (int) (value >>> 32));
+        }
+    }
+
+    @Override
+    protected void _setLongLE(int index, long value) {
+        Component c = findComponent(index);
+        if (index + 8 <= c.endOffset) {
+            c.buf.setLongLE(index - c.offset, value);
+        } else if (order() == ByteOrder.BIG_ENDIAN) {
+            _setIntLE(index, (int) value);
+            _setIntLE(index + 4, (int) (value >>> 32));
+        } else {
+            _setIntLE(index, (int) (value >>> 32));
+            _setIntLE(index + 4, (int) value);
         }
     }
 
@@ -937,6 +1205,11 @@ public class CompositeByteBuf extends AbstractReferenceCountedByteBuf {
             ByteBuf s = c.buf;
             int adjustment = c.offset;
             int localLength = Math.min(length, s.capacity() - (index - adjustment));
+            if (localLength == 0) {
+                // Skip empty buffer
+                i++;
+                continue;
+            }
             int localReadBytes = s.setBytes(index - adjustment, in, localLength);
             if (localReadBytes < 0) {
                 if (readBytes == 0) {
@@ -965,7 +1238,7 @@ public class CompositeByteBuf extends AbstractReferenceCountedByteBuf {
     public int setBytes(int index, ScatteringByteChannel in, int length) throws IOException {
         checkIndex(index, length);
         if (length == 0) {
-            return in.read(FULL_BYTEBUFFER);
+            return in.read(EMPTY_NIO_BUFFER);
         }
 
         int i = toComponentIndex(index);
@@ -975,7 +1248,60 @@ public class CompositeByteBuf extends AbstractReferenceCountedByteBuf {
             ByteBuf s = c.buf;
             int adjustment = c.offset;
             int localLength = Math.min(length, s.capacity() - (index - adjustment));
+            if (localLength == 0) {
+                // Skip empty buffer
+                i++;
+                continue;
+            }
             int localReadBytes = s.setBytes(index - adjustment, in, localLength);
+
+            if (localReadBytes == 0) {
+                break;
+            }
+
+            if (localReadBytes < 0) {
+                if (readBytes == 0) {
+                    return -1;
+                } else {
+                    break;
+                }
+            }
+
+            if (localReadBytes == localLength) {
+                index += localLength;
+                length -= localLength;
+                readBytes += localLength;
+                i ++;
+            } else {
+                index += localReadBytes;
+                length -= localReadBytes;
+                readBytes += localReadBytes;
+            }
+        } while (length > 0);
+
+        return readBytes;
+    }
+
+    @Override
+    public int setBytes(int index, FileChannel in, long position, int length) throws IOException {
+        checkIndex(index, length);
+        if (length == 0) {
+            return in.read(EMPTY_NIO_BUFFER, position);
+        }
+
+        int i = toComponentIndex(index);
+        int readBytes = 0;
+        do {
+            Component c = components.get(i);
+            ByteBuf s = c.buf;
+            int adjustment = c.offset;
+            int localLength = Math.min(length, s.capacity() - (index - adjustment));
+            if (localLength == 0) {
+                // Skip empty buffer
+                i++;
+                continue;
+            }
+            int localReadBytes = s.setBytes(index - adjustment, in, position + readBytes, localLength);
 
             if (localReadBytes == 0) {
                 break;
@@ -1007,7 +1333,7 @@ public class CompositeByteBuf extends AbstractReferenceCountedByteBuf {
     @Override
     public ByteBuf copy(int index, int length) {
         checkIndex(index, length);
-        ByteBuf dst = Unpooled.buffer(length);
+        ByteBuf dst = allocBuffer(length);
         if (length != 0) {
             copyTo(index, length, toComponentIndex(index), dst);
         }
@@ -1075,7 +1401,6 @@ public class CompositeByteBuf extends AbstractReferenceCountedByteBuf {
     }
 
     private Component findComponent(int offset) {
-        assert !freed;
         checkIndex(offset);
 
         for (int low = 0, high = components.size(); low <= high;) {
@@ -1086,6 +1411,7 @@ public class CompositeByteBuf extends AbstractReferenceCountedByteBuf {
             } else if (offset < c.offset) {
                 high = mid - 1;
             } else {
+                assert c.length != 0;
                 return c;
             }
         }
@@ -1095,12 +1421,14 @@ public class CompositeByteBuf extends AbstractReferenceCountedByteBuf {
 
     @Override
     public int nioBufferCount() {
-        if (components.size() == 1) {
+        switch (components.size()) {
+        case 0:
+            return 1;
+        case 1:
             return components.get(0).buf.nioBufferCount();
-        } else {
+        default:
             int count = 0;
             int componentsCount = components.size();
-            //noinspection ForLoopReplaceableByForEach
             for (int i = 0; i < componentsCount; i++) {
                 Component c = components.get(i);
                 count += c.buf.nioBufferCount();
@@ -1111,26 +1439,35 @@ public class CompositeByteBuf extends AbstractReferenceCountedByteBuf {
 
     @Override
     public ByteBuffer internalNioBuffer(int index, int length) {
-        if (components.size() == 1) {
+        switch (components.size()) {
+        case 0:
+            return EMPTY_NIO_BUFFER;
+        case 1:
             return components.get(0).buf.internalNioBuffer(index, length);
+        default:
+            throw new UnsupportedOperationException();
         }
-        throw new UnsupportedOperationException();
     }
 
     @Override
     public ByteBuffer nioBuffer(int index, int length) {
-        if (components.size() == 1) {
+        checkIndex(index, length);
+
+        switch (components.size()) {
+        case 0:
+            return EMPTY_NIO_BUFFER;
+        case 1:
             ByteBuf buf = components.get(0).buf;
             if (buf.nioBufferCount() == 1) {
                 return components.get(0).buf.nioBuffer(index, length);
             }
         }
+
         ByteBuffer merged = ByteBuffer.allocate(length).order(order());
         ByteBuffer[] buffers = nioBuffers(index, length);
 
-        //noinspection ForLoopReplaceableByForEach
-        for (int i = 0; i < buffers.length; i++) {
-            merged.put(buffers[i]);
+        for (ByteBuffer buf: buffers) {
+            merged.put(buf);
         }
 
         merged.flip();
@@ -1141,7 +1478,7 @@ public class CompositeByteBuf extends AbstractReferenceCountedByteBuf {
     public ByteBuffer[] nioBuffers(int index, int length) {
         checkIndex(index, length);
         if (length == 0) {
-            return EmptyArrays.EMPTY_BYTE_BUFFERS;
+            return new ByteBuffer[] { EMPTY_NIO_BUFFER };
         }
 
         List<ByteBuffer> buffers = new ArrayList<ByteBuffer>(components.size());
@@ -1173,7 +1510,7 @@ public class CompositeByteBuf extends AbstractReferenceCountedByteBuf {
      * Consolidate the composed {@link ByteBuf}s
      */
     public CompositeByteBuf consolidate() {
-        assert !freed;
+        ensureAccessible();
         final int numComponents = numComponents();
         if (numComponents <= 1) {
             return this;
@@ -1230,7 +1567,7 @@ public class CompositeByteBuf extends AbstractReferenceCountedByteBuf {
      * Discard all {@link ByteBuf}s which are read.
      */
     public CompositeByteBuf discardReadComponents() {
-        assert !freed;
+        ensureAccessible();
         final int readerIndex = readerIndex();
         if (readerIndex == 0) {
             return this;
@@ -1266,7 +1603,7 @@ public class CompositeByteBuf extends AbstractReferenceCountedByteBuf {
 
     @Override
     public CompositeByteBuf discardReadBytes() {
-        assert !freed;
+        ensureAccessible();
         final int readerIndex = readerIndex();
         if (readerIndex == 0) {
             return this;
@@ -1310,10 +1647,7 @@ public class CompositeByteBuf extends AbstractReferenceCountedByteBuf {
     }
 
     private ByteBuf allocBuffer(int capacity) {
-        if (direct) {
-            return alloc().directBuffer(capacity);
-        }
-        return alloc().heapBuffer(capacity);
+        return direct ? alloc().directBuffer(capacity) : alloc().heapBuffer(capacity);
     }
 
     @Override
@@ -1323,7 +1657,7 @@ public class CompositeByteBuf extends AbstractReferenceCountedByteBuf {
         return result + ", components=" + components.size() + ')';
     }
 
-    private final class Component {
+    private static final class Component {
         final ByteBuf buf;
         final int length;
         int offset;
@@ -1335,7 +1669,6 @@ public class CompositeByteBuf extends AbstractReferenceCountedByteBuf {
         }
 
         void freeIfNecessary() {
-            // Unwrap so that we can free slices, too.
             buf.release(); // We should not get a NPE here. If so, it must be a bug.
         }
     }
@@ -1572,17 +1905,11 @@ public class CompositeByteBuf extends AbstractReferenceCountedByteBuf {
 
     @Override
     public CompositeByteBuf touch() {
-        if (leak != null) {
-            leak.record();
-        }
         return this;
     }
 
     @Override
     public CompositeByteBuf touch(Object hint) {
-        if (leak != null) {
-            leak.record(hint);
-        }
         return this;
     }
 
@@ -1603,17 +1930,46 @@ public class CompositeByteBuf extends AbstractReferenceCountedByteBuf {
         }
 
         freed = true;
-        for (Component c: components) {
-            c.freeIfNecessary();
-        }
-
-        if (leak != null) {
-            leak.close();
+        int size = components.size();
+        // We're not using foreach to avoid creating an iterator.
+        // see https://github.com/netty/netty/issues/2642
+        for (int i = 0; i < size; i++) {
+            components.get(i).freeIfNecessary();
         }
     }
 
     @Override
     public ByteBuf unwrap() {
         return null;
+    }
+
+    private final class CompositeByteBufIterator implements Iterator<ByteBuf> {
+        private final int size = components.size();
+        private int index;
+
+        @Override
+        public boolean hasNext() {
+            return size > index;
+        }
+
+        @Override
+        public ByteBuf next() {
+            if (size != components.size()) {
+                throw new ConcurrentModificationException();
+            }
+            if (!hasNext()) {
+                throw new NoSuchElementException();
+            }
+            try {
+                return components.get(index++).buf;
+            } catch (IndexOutOfBoundsException e) {
+                throw new ConcurrentModificationException();
+            }
+        }
+
+        @Override
+        public void remove() {
+            throw new UnsupportedOperationException("Read-Only");
+        }
     }
 }

@@ -16,6 +16,9 @@
 
 package io.netty.util.concurrent;
 
+import io.netty.util.internal.DefaultPriorityQueue;
+import io.netty.util.internal.PriorityQueueNode;
+
 import java.util.Queue;
 import java.util.concurrent.Callable;
 import java.util.concurrent.Delayed;
@@ -23,7 +26,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 @SuppressWarnings("ComparableImplementedButEqualsNotOverridden")
-final class ScheduledFutureTask<V> extends PromiseTask<V> implements ScheduledFuture<V> {
+final class ScheduledFutureTask<V> extends PromiseTask<V> implements ScheduledFuture<V>, PriorityQueueNode {
     private static final AtomicLong nextTaskId = new AtomicLong();
     private static final long START_TIME = System.nanoTime();
 
@@ -36,37 +39,36 @@ final class ScheduledFutureTask<V> extends PromiseTask<V> implements ScheduledFu
     }
 
     private final long id = nextTaskId.getAndIncrement();
-    private final Queue<ScheduledFutureTask<?>> delayedTaskQueue;
     private long deadlineNanos;
     /* 0 - no repeat, >0 - repeat at fixed rate, <0 - repeat with fixed delay */
     private final long periodNanos;
 
+    private int queueIndex = INDEX_NOT_IN_QUEUE;
+
     ScheduledFutureTask(
-            EventExecutor executor, Queue<ScheduledFutureTask<?>> delayedTaskQueue,
+            AbstractScheduledEventExecutor executor,
             Runnable runnable, V result, long nanoTime) {
 
-        this(executor, delayedTaskQueue, toCallable(runnable, result), nanoTime);
+        this(executor, toCallable(runnable, result), nanoTime);
     }
 
     ScheduledFutureTask(
-            EventExecutor executor, Queue<ScheduledFutureTask<?>> delayedTaskQueue,
+            AbstractScheduledEventExecutor executor,
             Callable<V> callable, long nanoTime, long period) {
 
         super(executor, callable);
         if (period == 0) {
             throw new IllegalArgumentException("period: 0 (expected: != 0)");
         }
-        this.delayedTaskQueue = delayedTaskQueue;
         deadlineNanos = nanoTime;
         periodNanos = period;
     }
 
     ScheduledFutureTask(
-            EventExecutor executor, Queue<ScheduledFutureTask<?>> delayedTaskQueue,
+            AbstractScheduledEventExecutor executor,
             Callable<V> callable, long nanoTime) {
 
         super(executor, callable);
-        this.delayedTaskQueue = delayedTaskQueue;
         deadlineNanos = nanoTime;
         periodNanos = 0;
     }
@@ -135,7 +137,11 @@ final class ScheduledFutureTask<V> extends PromiseTask<V> implements ScheduledFu
                             deadlineNanos = nanoTime() - p;
                         }
                         if (!isCancelled()) {
-                            delayedTaskQueue.add(this);
+                            // scheduledTaskQueue can never be null as we lazy init it before submit the task!
+                            Queue<ScheduledFutureTask<?>> scheduledTaskQueue =
+                                    ((AbstractScheduledEventExecutor) executor()).scheduledTaskQueue;
+                            assert scheduledTaskQueue != null;
+                            scheduledTaskQueue.add(this);
                         }
                     }
                 }
@@ -146,16 +152,39 @@ final class ScheduledFutureTask<V> extends PromiseTask<V> implements ScheduledFu
     }
 
     @Override
+    public boolean cancel(boolean mayInterruptIfRunning) {
+        boolean canceled = super.cancel(mayInterruptIfRunning);
+        if (canceled) {
+            ((AbstractScheduledEventExecutor) executor()).removeScheduled(this);
+        }
+        return canceled;
+    }
+
+    boolean cancelWithoutRemove(boolean mayInterruptIfRunning) {
+        return super.cancel(mayInterruptIfRunning);
+    }
+
+    @Override
     protected StringBuilder toStringBuilder() {
         StringBuilder buf = super.toStringBuilder();
         buf.setCharAt(buf.length() - 1, ',');
-        buf.append(" id: ");
-        buf.append(id);
-        buf.append(", deadline: ");
-        buf.append(deadlineNanos);
-        buf.append(", period: ");
-        buf.append(periodNanos);
-        buf.append(')');
-        return buf;
+
+        return buf.append(" id: ")
+                  .append(id)
+                  .append(", deadline: ")
+                  .append(deadlineNanos)
+                  .append(", period: ")
+                  .append(periodNanos)
+                  .append(')');
+    }
+
+    @Override
+    public int priorityQueueIndex(DefaultPriorityQueue<?> queue) {
+        return queueIndex;
+    }
+
+    @Override
+    public void priorityQueueIndex(DefaultPriorityQueue<?> queue, int i) {
+        queueIndex = i;
     }
 }

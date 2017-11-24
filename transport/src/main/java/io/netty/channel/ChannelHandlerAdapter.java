@@ -16,8 +16,12 @@
 
 package io.netty.channel;
 
+import io.netty.util.internal.InternalThreadLocalMap;
+
+import java.util.Map;
+
 /**
- * Skelton implementation of a {@link ChannelHandler}.
+ * Skeleton implementation of a {@link ChannelHandler}.
  */
 public abstract class ChannelHandlerAdapter implements ChannelHandler {
 
@@ -25,11 +29,35 @@ public abstract class ChannelHandlerAdapter implements ChannelHandler {
     boolean added;
 
     /**
+     * Throws {@link IllegalStateException} if {@link ChannelHandlerAdapter#isSharable()} returns {@code true}
+     */
+    protected void ensureNotSharable() {
+        if (isSharable()) {
+            throw new IllegalStateException("ChannelHandler " + getClass().getName() + " is not allowed to be shared");
+        }
+    }
+
+    /**
      * Return {@code true} if the implementation is {@link Sharable} and so can be added
      * to different {@link ChannelPipeline}s.
      */
     public boolean isSharable() {
-        return getClass().isAnnotationPresent(Sharable.class);
+        /**
+         * Cache the result of {@link Sharable} annotation detection to workaround a condition. We use a
+         * {@link ThreadLocal} and {@link WeakHashMap} to eliminate the volatile write/reads. Using different
+         * {@link WeakHashMap} instances per {@link Thread} is good enough for us and the number of
+         * {@link Thread}s are quite limited anyway.
+         *
+         * See <a href="https://github.com/netty/netty/issues/2289">#2289</a>.
+         */
+        Class<?> clazz = getClass();
+        Map<Class<?>, Boolean> cache = InternalThreadLocalMap.get().handlerSharableCache();
+        Boolean sharable = cache.get(clazz);
+        if (sharable == null) {
+            sharable = clazz.isAnnotationPresent(Sharable.class);
+            cache.put(clazz, sharable);
+        }
+        return sharable;
     }
 
     /**
@@ -54,10 +82,8 @@ public abstract class ChannelHandlerAdapter implements ChannelHandler {
      *
      * Sub-classes may override this method to change behavior.
      */
-    @Deprecated
     @Override
-    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause)
-            throws Exception {
+    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
         ctx.fireExceptionCaught(cause);
     }
 }

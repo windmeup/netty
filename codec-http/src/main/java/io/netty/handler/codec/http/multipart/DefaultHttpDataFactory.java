@@ -22,8 +22,10 @@ import io.netty.util.internal.PlatformDependent;
 import java.io.IOException;
 import java.nio.charset.Charset;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Map.Entry;
 
 /**
  * Default factory giving Attribute and FileUpload according to constructor
@@ -139,13 +141,34 @@ public class DefaultHttpDataFactory implements HttpDataFactory {
         return attribute;
     }
 
+    @Override
+    public Attribute createAttribute(HttpRequest request, String name, long definedSize) {
+        if (useDisk) {
+            Attribute attribute = new DiskAttribute(name, definedSize, charset);
+            attribute.setMaxSize(maxSize);
+            List<HttpData> fileToDelete = getList(request);
+            fileToDelete.add(attribute);
+            return attribute;
+        }
+        if (checkSize) {
+            Attribute attribute = new MixedAttribute(name, definedSize, minSize, charset);
+            attribute.setMaxSize(maxSize);
+            List<HttpData> fileToDelete = getList(request);
+            fileToDelete.add(attribute);
+            return attribute;
+        }
+        MemoryAttribute attribute = new MemoryAttribute(name, definedSize);
+        attribute.setMaxSize(maxSize);
+        return attribute;
+    }
+
     /**
      * Utility method
      */
     private static void checkHttpDataSize(HttpData data) {
         try {
             data.checkSize(data.length());
-        } catch (IOException e) {
+        } catch (IOException ignored) {
             throw new IllegalArgumentException("Attribute bigger than maxSize allowed");
         }
     }
@@ -235,15 +258,18 @@ public class DefaultHttpDataFactory implements HttpDataFactory {
 
     @Override
     public void cleanAllHttpData() {
-        for (HttpRequest request : requestFileDeleteMap.keySet()) {
-            List<HttpData> fileToDelete = requestFileDeleteMap.get(request);
+        Iterator<Entry<HttpRequest, List<HttpData>>> i = requestFileDeleteMap.entrySet().iterator();
+        while (i.hasNext()) {
+            Entry<HttpRequest, List<HttpData>> e = i.next();
+            i.remove();
+
+            List<HttpData> fileToDelete = e.getValue();
             if (fileToDelete != null) {
-                for (HttpData data: fileToDelete) {
+                for (HttpData data : fileToDelete) {
                     data.delete();
                 }
                 fileToDelete.clear();
             }
-            requestFileDeleteMap.remove(request);
         }
     }
 

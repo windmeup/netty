@@ -20,9 +20,11 @@ import org.junit.Test;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.nio.ByteBuffer;
 import java.nio.ReadOnlyBufferException;
 import java.nio.channels.ScatteringByteChannel;
+import java.nio.charset.Charset;
 
 import static io.netty.buffer.Unpooled.*;
 import static io.netty.util.ReferenceCountUtil.*;
@@ -31,103 +33,153 @@ import static org.junit.Assert.*;
 public class FixedCompositeByteBufTest {
 
     private static ByteBuf newBuffer(ByteBuf... buffers) {
-        return releaseLater(new FixedCompositeByteBuf(UnpooledByteBufAllocator.DEFAULT, buffers));
+        return new FixedCompositeByteBuf(UnpooledByteBufAllocator.DEFAULT, buffers);
     }
 
     @Test(expected = ReadOnlyBufferException.class)
     public void testSetBoolean() {
         ByteBuf buf = newBuffer(wrappedBuffer(new byte[8]));
-        buf.setBoolean(0, true);
+        try {
+            buf.setBoolean(0, true);
+        } finally {
+            buf.release();
+        }
     }
 
     @Test(expected = ReadOnlyBufferException.class)
     public void testSetByte() {
         ByteBuf buf = newBuffer(wrappedBuffer(new byte[8]));
-        buf.setByte(0, 1);
+        try {
+            buf.setByte(0, 1);
+        } finally {
+            buf.release();
+        }
     }
 
     @Test(expected = ReadOnlyBufferException.class)
     public void testSetBytesWithByteBuf() {
         ByteBuf buf = newBuffer(wrappedBuffer(new byte[8]));
-        buf.setBytes(0, wrappedBuffer(new byte[4]));
+        ByteBuf src = wrappedBuffer(new byte[4]);
+        try {
+            buf.setBytes(0, src);
+        } finally {
+            buf.release();
+            src.release();
+        }
     }
 
     @Test(expected = ReadOnlyBufferException.class)
     public void testSetBytesWithByteBuffer() {
         ByteBuf buf = newBuffer(wrappedBuffer(new byte[8]));
-        buf.setBytes(0, ByteBuffer.wrap(new byte[4]));
+        try {
+            buf.setBytes(0, ByteBuffer.wrap(new byte[4]));
+        } finally {
+            buf.release();
+        }
     }
 
     @Test(expected = ReadOnlyBufferException.class)
     public void testSetBytesWithInputStream() throws IOException {
         ByteBuf buf = newBuffer(wrappedBuffer(new byte[8]));
-        buf.setBytes(0, new ByteArrayInputStream(new byte[4]), 4);
+        try {
+            buf.setBytes(0, new ByteArrayInputStream(new byte[4]), 4);
+        } finally {
+            buf.release();
+        }
     }
 
     @Test(expected = ReadOnlyBufferException.class)
     public void testSetBytesWithChannel() throws IOException {
         ByteBuf buf = newBuffer(wrappedBuffer(new byte[8]));
-        buf.setBytes(0, new ScatteringByteChannel() {
-            @Override
-            public long read(ByteBuffer[] dsts, int offset, int length) {
-                return 0;
-            }
+        try {
+            buf.setBytes(0, new ScatteringByteChannel() {
+                @Override
+                public long read(ByteBuffer[] dsts, int offset, int length) {
+                    return 0;
+                }
 
-            @Override
-            public long read(ByteBuffer[] dsts) {
-                return 0;
-            }
+                @Override
+                public long read(ByteBuffer[] dsts) {
+                    return 0;
+                }
 
-            @Override
-            public int read(ByteBuffer dst) {
-                return 0;
-            }
+                @Override
+                public int read(ByteBuffer dst) {
+                    return 0;
+                }
 
-            @Override
-            public boolean isOpen() {
-                return true;
-            }
+                @Override
+                public boolean isOpen() {
+                    return true;
+                }
 
-            @Override
-            public void close() {
-            }
-        }, 4);
+                @Override
+                public void close() {
+                }
+            }, 4);
+        } finally {
+            buf.release();
+        }
     }
 
     @Test(expected = ReadOnlyBufferException.class)
     public void testSetChar() throws IOException {
         ByteBuf buf = newBuffer(wrappedBuffer(new byte[8]));
-        buf.setChar(0, 'b');
+        try {
+            buf.setChar(0, 'b');
+        } finally {
+            buf.release();
+        }
     }
 
     @Test(expected = ReadOnlyBufferException.class)
     public void testSetDouble() throws IOException {
         ByteBuf buf = newBuffer(wrappedBuffer(new byte[8]));
-        buf.setDouble(0, 1);
+        try {
+            buf.setDouble(0, 1);
+        } finally {
+            buf.release();
+        }
     }
 
     @Test(expected = ReadOnlyBufferException.class)
     public void testSetFloat() throws IOException {
         ByteBuf buf = newBuffer(wrappedBuffer(new byte[8]));
-        buf.setFloat(0, 1);
+        try {
+            buf.setFloat(0, 1);
+        } finally {
+            buf.release();
+        }
     }
 
     @Test(expected = ReadOnlyBufferException.class)
     public void testSetInt() throws IOException {
         ByteBuf buf = newBuffer(wrappedBuffer(new byte[8]));
-        buf.setInt(0, 1);
+        try {
+            buf.setInt(0, 1);
+        } finally {
+            buf.release();
+        }
     }
 
     @Test(expected = ReadOnlyBufferException.class)
     public void testSetLong() {
         ByteBuf buf = newBuffer(wrappedBuffer(new byte[8]));
-        buf.setLong(0, 1);
+        try {
+            buf.setLong(0, 1);
+        } finally {
+            buf.release();
+        }
     }
 
     @Test(expected = ReadOnlyBufferException.class)
     public void testSetMedium() throws IOException {
         ByteBuf buf = newBuffer(wrappedBuffer(new byte[8]));
-        buf.setMedium(0, 1);
+        try {
+            buf.setMedium(0, 1);
+        } finally {
+            buf.release();
+        }
     }
 
     @Test
@@ -250,6 +302,80 @@ public class FixedCompositeByteBufTest {
         buf.getBytes(1, data);
         assertArrayEquals(data, channel.writtenBytes());
 
+        buf.release();
+    }
+
+    @Test
+    public void testCopyingToOtherBuffer() {
+        ByteBuf buf1 = directBuffer(10);
+        ByteBuf buf2 = buffer(10);
+        ByteBuf buf3 = directBuffer(10);
+        buf1.writeBytes("a".getBytes(Charset.defaultCharset()));
+        buf2.writeBytes("b".getBytes(Charset.defaultCharset()));
+        buf3.writeBytes("c".getBytes(Charset.defaultCharset()));
+        ByteBuf composite = unmodifiableBuffer(buf1, buf2, buf3);
+        ByteBuf copy = directBuffer(3);
+        ByteBuf copy2 = buffer(3);
+        copy.setBytes(0, composite, 0, 3);
+        copy2.setBytes(0, composite, 0, 3);
+        copy.writerIndex(3);
+        copy2.writerIndex(3);
+        assertEquals(0, ByteBufUtil.compare(copy, composite));
+        assertEquals(0, ByteBufUtil.compare(copy2, composite));
+        assertEquals(0, ByteBufUtil.compare(copy, copy2));
+        copy.release();
+        copy2.release();
+        composite.release();
+    }
+
+    @Test
+    public void testCopyingToOutputStream() throws IOException {
+        ByteBuf buf1 = directBuffer(10);
+        ByteBuf buf2 = buffer(10);
+        ByteBuf buf3 = directBuffer(10);
+        buf1.writeBytes("a".getBytes(Charset.defaultCharset()));
+        buf2.writeBytes("b".getBytes(Charset.defaultCharset()));
+        buf3.writeBytes("c".getBytes(Charset.defaultCharset()));
+        ByteBuf composite = unmodifiableBuffer(buf1, buf2, buf3);
+        ByteBuf copy = directBuffer(3);
+        ByteBuf copy2 = buffer(3);
+        OutputStream copyStream = new ByteBufOutputStream(copy);
+        OutputStream copy2Stream = new ByteBufOutputStream(copy2);
+        try {
+            composite.getBytes(0, copyStream, 3);
+            composite.getBytes(0, copy2Stream, 3);
+            assertEquals(0, ByteBufUtil.compare(copy, composite));
+            assertEquals(0, ByteBufUtil.compare(copy2, composite));
+            assertEquals(0, ByteBufUtil.compare(copy, copy2));
+        } finally {
+            copy.release();
+            copy2.release();
+            copyStream.close();
+            copy2Stream.close();
+            composite.release();
+        }
+    }
+
+    @Test
+    public void testExtractNioBuffers() {
+        ByteBuf buf1 = directBuffer(10);
+        ByteBuf buf2 = buffer(10);
+        ByteBuf buf3 = directBuffer(10);
+        buf1.writeBytes("a".getBytes(Charset.defaultCharset()));
+        buf2.writeBytes("b".getBytes(Charset.defaultCharset()));
+        buf3.writeBytes("c".getBytes(Charset.defaultCharset()));
+        ByteBuf composite = unmodifiableBuffer(buf1, buf2, buf3);
+        ByteBuffer[] byteBuffers = composite.nioBuffers(0, 3);
+        assertEquals(3, byteBuffers.length);
+        assertEquals(1, byteBuffers[0].limit());
+        assertEquals(1, byteBuffers[1].limit());
+        assertEquals(1, byteBuffers[2].limit());
+        composite.release();
+    }
+
+    @Test
+    public void testEmptyArray() {
+        ByteBuf buf = newBuffer(new ByteBuf[0]);
         buf.release();
     }
 }

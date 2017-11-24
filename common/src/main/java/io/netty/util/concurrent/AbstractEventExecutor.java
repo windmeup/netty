@@ -15,10 +15,13 @@
  */
 package io.netty.util.concurrent;
 
+import io.netty.util.internal.logging.InternalLogger;
+import io.netty.util.internal.logging.InternalLoggerFactory;
+
+import java.util.Collection;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
-import java.util.NoSuchElementException;
 import java.util.concurrent.AbstractExecutorService;
 import java.util.concurrent.Callable;
 import java.util.concurrent.RunnableFuture;
@@ -28,6 +31,26 @@ import java.util.concurrent.TimeUnit;
  * Abstract base class for {@link EventExecutor} implementations.
  */
 public abstract class AbstractEventExecutor extends AbstractExecutorService implements EventExecutor {
+    private static final InternalLogger logger = InternalLoggerFactory.getInstance(AbstractEventExecutor.class);
+
+    static final long DEFAULT_SHUTDOWN_QUIET_PERIOD = 2;
+    static final long DEFAULT_SHUTDOWN_TIMEOUT = 15;
+
+    private final EventExecutorGroup parent;
+    private final Collection<EventExecutor> selfCollection = Collections.<EventExecutor>singleton(this);
+
+    protected AbstractEventExecutor() {
+        this(null);
+    }
+
+    protected AbstractEventExecutor(EventExecutorGroup parent) {
+        this.parent = parent;
+    }
+
+    @Override
+    public EventExecutorGroup parent() {
+        return parent;
+    }
 
     @Override
     public EventExecutor next() {
@@ -41,12 +64,12 @@ public abstract class AbstractEventExecutor extends AbstractExecutorService impl
 
     @Override
     public Iterator<EventExecutor> iterator() {
-        return new EventExecutorIterator();
+        return selfCollection.iterator();
     }
 
     @Override
     public Future<?> shutdownGracefully() {
-        return shutdownGracefully(2, 15, TimeUnit.SECONDS);
+        return shutdownGracefully(DEFAULT_SHUTDOWN_QUIET_PERIOD, DEFAULT_SHUTDOWN_TIMEOUT, TimeUnit.SECONDS);
     }
 
     /**
@@ -132,26 +155,14 @@ public abstract class AbstractEventExecutor extends AbstractExecutorService impl
         throw new UnsupportedOperationException();
     }
 
-    private final class EventExecutorIterator implements Iterator<EventExecutor> {
-        private boolean nextCalled;
-
-        @Override
-        public boolean hasNext() {
-            return !nextCalled;
-        }
-
-        @Override
-        public EventExecutor next() {
-            if (!hasNext()) {
-                throw new NoSuchElementException();
-            }
-            nextCalled = true;
-            return AbstractEventExecutor.this;
-        }
-
-        @Override
-        public void remove() {
-            throw new UnsupportedOperationException("read-only");
+    /**
+     * Try to execute the given {@link Runnable} and just log if it throws a {@link Throwable}.
+     */
+    protected static void safeExecute(Runnable task) {
+        try {
+            task.run();
+        } catch (Throwable t) {
+            logger.warn("A task raised an exception. Task: {}", task, t);
         }
     }
 }

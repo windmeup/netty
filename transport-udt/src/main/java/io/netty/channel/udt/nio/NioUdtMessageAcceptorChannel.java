@@ -17,35 +17,22 @@ package io.netty.channel.udt.nio;
 
 import com.barchart.udt.TypeUDT;
 import com.barchart.udt.nio.SocketChannelUDT;
-import io.netty.channel.ChannelMetadata;
-
-import java.util.List;
+import io.netty.channel.udt.UdtChannel;
 
 /**
  * Message Channel Acceptor for UDT Datagrams.
+ *
+ * @deprecated The UDT transport is no longer maintained and will be removed.
  */
+@Deprecated
 public class NioUdtMessageAcceptorChannel extends NioUdtAcceptorChannel {
-
-    private static final ChannelMetadata METADATA = new ChannelMetadata(false);
 
     public NioUdtMessageAcceptorChannel() {
         super(TypeUDT.DATAGRAM);
     }
 
     @Override
-    protected int doReadMessages(List<Object> buf) throws Exception {
-        final SocketChannelUDT channelUDT = javaChannel().accept();
-        if (channelUDT == null) {
-            return 0;
-        } else {
-            buf.add(new NioUdtMessageConnectorChannel(this, channelUDT));
-            return 1;
-        }
+    protected UdtChannel newConnectorChannel(SocketChannelUDT channelUDT) {
+        return new NioUdtMessageConnectorChannel(this, channelUDT);
     }
-
-    @Override
-    public ChannelMetadata metadata() {
-        return METADATA;
-    }
-
 }

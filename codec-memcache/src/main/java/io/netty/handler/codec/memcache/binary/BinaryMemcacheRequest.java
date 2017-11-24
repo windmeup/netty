@@ -15,18 +15,27 @@
  */
 package io.netty.handler.codec.memcache.binary;
 
+import io.netty.util.internal.UnstableApi;
+
 /**
  * Represents a full {@link BinaryMemcacheRequest}, which contains the header and optional key and extras.
  */
-public interface BinaryMemcacheRequest extends BinaryMemcacheMessage<BinaryMemcacheRequestHeader> {
+@UnstableApi
+public interface BinaryMemcacheRequest extends BinaryMemcacheMessage {
 
     /**
-     * Returns the {@link BinaryMemcacheRequestHeader} which contains the full required request header.
+     * Returns the reserved field value.
      *
-     * @return the required request header.
+     * @return the reserved field value.
      */
-    @Override
-    BinaryMemcacheRequestHeader getHeader();
+    short reserved();
+
+    /**
+     * Sets the reserved field value.
+     *
+     * @param reserved the reserved field value.
+     */
+    BinaryMemcacheRequest setReserved(short reserved);
 
     @Override
     BinaryMemcacheRequest retain();

@@ -16,23 +16,23 @@
 
 package io.netty.buffer;
 
-final class PoolSubpage<T> {
+final class PoolSubpage<T> implements PoolSubpageMetric {
 
     final PoolChunk<T> chunk;
-    final int memoryMapIdx;
-    final int runOffset;
-    final int pageSize;
-    final long[] bitmap;
+    private final int memoryMapIdx;
+    private final int runOffset;
+    private final int pageSize;
+    private final long[] bitmap;
 
     PoolSubpage<T> prev;
     PoolSubpage<T> next;
 
     boolean doNotDestroy;
     int elemSize;
-    int maxNumElems;
-    int nextAvail;
-    int bitmapLength;
-    int numAvail;
+    private int maxNumElems;
+    private int bitmapLength;
+    private int nextAvail;
+    private int numAvail;
 
     // TODO: Test if adding padding helps under contention
     //private long pad0, pad1, pad2, pad3, pad4, pad5, pad6, pad7;
@@ -47,16 +47,16 @@ final class PoolSubpage<T> {
         bitmap = null;
     }
 
-    PoolSubpage(PoolChunk<T> chunk, int memoryMapIdx, int runOffset, int pageSize, int elemSize) {
+    PoolSubpage(PoolSubpage<T> head, PoolChunk<T> chunk, int memoryMapIdx, int runOffset, int pageSize, int elemSize) {
         this.chunk = chunk;
         this.memoryMapIdx = memoryMapIdx;
         this.runOffset = runOffset;
         this.pageSize = pageSize;
         bitmap = new long[pageSize >>> 10]; // pageSize / 16 / 64
-        init(elemSize);
+        init(head, elemSize);
     }
 
-    void init(int elemSize) {
+    void init(PoolSubpage<T> head, int elemSize) {
         doNotDestroy = true;
         this.elemSize = elemSize;
         if (elemSize != 0) {
@@ -71,8 +71,7 @@ final class PoolSubpage<T> {
                 bitmap[i] = 0;
             }
         }
-
-        addToPool();
+        addToPool(head);
     }
 
     /**
@@ -87,7 +86,7 @@ final class PoolSubpage<T> {
             return -1;
         }
 
-        final int bitmapIdx = nextAvail;
+        final int bitmapIdx = getNextAvail();
         int q = bitmapIdx >>> 6;
         int r = bitmapIdx & 63;
         assert (bitmap[q] >>> r & 1) == 0;
@@ -95,9 +94,6 @@ final class PoolSubpage<T> {
 
         if (-- numAvail == 0) {
             removeFromPool();
-            nextAvail = -1;
-        } else {
-            nextAvail = findNextAvailable();
         }
 
         return toHandle(bitmapIdx);
@@ -107,20 +103,19 @@ final class PoolSubpage<T> {
      * @return {@code true} if this subpage is in use.
      *         {@code false} if this subpage is not used by its chunk and thus it's OK to be released.
      */
-    boolean free(int bitmapIdx) {
-
+    boolean free(PoolSubpage<T> head, int bitmapIdx) {
         if (elemSize == 0) {
             return true;
         }
-
         int q = bitmapIdx >>> 6;
         int r = bitmapIdx & 63;
         assert (bitmap[q] >>> r & 1) != 0;
         bitmap[q] ^= 1L << r;
 
+        setNextAvail(bitmapIdx);
+
         if (numAvail ++ == 0) {
-            nextAvail = bitmapIdx;
-            addToPool();
+            addToPool(head);
             return true;
         }
 
@@ -140,8 +135,7 @@ final class PoolSubpage<T> {
         }
     }
 
-    private void addToPool() {
-        PoolSubpage<T> head = chunk.arena.findSubpagePoolHead(elemSize);
+    private void addToPool(PoolSubpage<T> head) {
         assert prev == null && next == null;
         prev = head;
         next = head.next;
@@ -157,39 +151,109 @@ final class PoolSubpage<T> {
         prev = null;
     }
 
-    private int findNextAvailable() {
-        int newNextAvail = -1;
-        loop:
+    private void setNextAvail(int bitmapIdx) {
+        nextAvail = bitmapIdx;
+    }
+
+    private int getNextAvail() {
+        int nextAvail = this.nextAvail;
+        if (nextAvail >= 0) {
+            this.nextAvail = -1;
+            return nextAvail;
+        }
+        return findNextAvail();
+    }
+
+    private int findNextAvail() {
+        final long[] bitmap = this.bitmap;
+        final int bitmapLength = this.bitmapLength;
         for (int i = 0; i < bitmapLength; i ++) {
             long bits = bitmap[i];
             if (~bits != 0) {
-                for (int j = 0; j < 64; j ++) {
-                    if ((bits & 1) == 0) {
-                        newNextAvail = i << 6 | j;
-                        break loop;
-                    }
-                    bits >>>= 1;
-                }
+                return findNextAvail0(i, bits);
             }
         }
+        return -1;
+    }
 
-        if (newNextAvail < maxNumElems) {
-            return newNextAvail;
-        } else {
-            return -1;
+    private int findNextAvail0(int i, long bits) {
+        final int maxNumElems = this.maxNumElems;
+        final int baseVal = i << 6;
+
+        for (int j = 0; j < 64; j ++) {
+            if ((bits & 1) == 0) {
+                int val = baseVal | j;
+                if (val < maxNumElems) {
+                    return val;
+                } else {
+                    break;
+                }
+            }
+            bits >>>= 1;
         }
+        return -1;
     }
 
     private long toHandle(int bitmapIdx) {
         return 0x4000000000000000L | (long) bitmapIdx << 32 | memoryMapIdx;
     }
 
+    @Override
     public String toString() {
+        final boolean doNotDestroy;
+        final int maxNumElems;
+        final int numAvail;
+        final int elemSize;
+        synchronized (chunk.arena) {
+            if (!this.doNotDestroy) {
+                doNotDestroy = false;
+                // Not used for creating the String.
+                maxNumElems = numAvail = elemSize = -1;
+            } else {
+                doNotDestroy = true;
+                maxNumElems = this.maxNumElems;
+                numAvail = this.numAvail;
+                elemSize = this.elemSize;
+            }
+        }
+
         if (!doNotDestroy) {
             return "(" + memoryMapIdx + ": not in use)";
         }
 
-        return String.valueOf('(') + memoryMapIdx + ": " + (maxNumElems - numAvail) + '/' + maxNumElems +
-               ", offset: " + runOffset + ", length: " + pageSize + ", elemSize: " + elemSize + ')';
+        return "(" + memoryMapIdx + ": " + (maxNumElems - numAvail) + '/' + maxNumElems +
+                ", offset: " + runOffset + ", length: " + pageSize + ", elemSize: " + elemSize + ')';
+    }
+
+    @Override
+    public int maxNumElements() {
+        synchronized (chunk.arena) {
+            return maxNumElems;
+        }
+    }
+
+    @Override
+    public int numAvailable() {
+        synchronized (chunk.arena) {
+            return numAvail;
+        }
+    }
+
+    @Override
+    public int elementSize() {
+        synchronized (chunk.arena) {
+            return elemSize;
+        }
+    }
+
+    @Override
+    public int pageSize() {
+        return pageSize;
+    }
+
+    void destroy() {
+        if (chunk != null) {
+            chunk.destroy();
+        }
     }
 }

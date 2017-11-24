@@ -18,6 +18,7 @@ package io.netty.handler.codec.socks;
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.handler.codec.ReplayingDecoder;
+import io.netty.handler.codec.socks.SocksAuthResponseDecoder.State;
 
 import java.util.List;
 
@@ -25,16 +26,7 @@ import java.util.List;
  * Decodes {@link ByteBuf}s into {@link SocksAuthResponse}.
  * Before returning SocksResponse decoder removes itself from pipeline.
  */
-public class SocksAuthResponseDecoder extends ReplayingDecoder<SocksAuthResponseDecoder.State> {
-    private static final String name = "SOCKS_AUTH_RESPONSE_DECODER";
-
-    public static String getName() {
-        return name;
-    }
-
-    private SocksSubnegotiationVersion version;
-    private SocksAuthStatus authStatus;
-    private SocksResponse msg = SocksCommonUtils.UNKNOWN_SOCKS_RESPONSE;
+public class SocksAuthResponseDecoder extends ReplayingDecoder<State> {
 
     public SocksAuthResponseDecoder() {
         super(State.CHECK_PROTOCOL_VERSION);
@@ -45,19 +37,22 @@ public class SocksAuthResponseDecoder extends ReplayingDecoder<SocksAuthResponse
             throws Exception {
         switch (state()) {
             case CHECK_PROTOCOL_VERSION: {
-                version = SocksSubnegotiationVersion.fromByte(byteBuf.readByte());
-                if (version != SocksSubnegotiationVersion.AUTH_PASSWORD) {
+                if (byteBuf.readByte() != SocksSubnegotiationVersion.AUTH_PASSWORD.byteValue()) {
+                    out.add(SocksCommonUtils.UNKNOWN_SOCKS_RESPONSE);
                     break;
                 }
                 checkpoint(State.READ_AUTH_RESPONSE);
             }
             case READ_AUTH_RESPONSE: {
-                authStatus = SocksAuthStatus.fromByte(byteBuf.readByte());
-                msg = new SocksAuthResponse(authStatus);
+                SocksAuthStatus authStatus = SocksAuthStatus.valueOf(byteBuf.readByte());
+                out.add(new SocksAuthResponse(authStatus));
+                break;
+            }
+            default: {
+                throw new Error();
             }
         }
         channelHandlerContext.pipeline().remove(this);
-        out.add(msg);
     }
 
     enum State {

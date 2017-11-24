@@ -17,6 +17,7 @@ package io.netty.handler.codec;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.util.ByteProcessor;
 
 import java.util.List;
 
@@ -37,6 +38,9 @@ public class LineBasedFrameDecoder extends ByteToMessageDecoder {
     /** True if we're discarding input because we're already over maxLength.  */
     private boolean discarding;
     private int discardedBytes;
+
+    /** Last scan position. */
+    private int offset;
 
     /**
      * Creates a new decoder.
@@ -100,10 +104,10 @@ public class LineBasedFrameDecoder extends ByteToMessageDecoder {
                 }
 
                 if (stripDelimiter) {
-                    frame = buffer.readBytes(length);
+                    frame = buffer.readRetainedSlice(length);
                     buffer.skipBytes(delimLength);
                 } else {
-                    frame = buffer.readBytes(length + delimLength);
+                    frame = buffer.readRetainedSlice(length + delimLength);
                 }
 
                 return frame;
@@ -113,6 +117,7 @@ public class LineBasedFrameDecoder extends ByteToMessageDecoder {
                     discardedBytes = length;
                     buffer.readerIndex(buffer.writerIndex());
                     discarding = true;
+                    offset = 0;
                     if (failFast) {
                         fail(ctx, "over " + discardedBytes);
                     }
@@ -130,7 +135,7 @@ public class LineBasedFrameDecoder extends ByteToMessageDecoder {
                     fail(ctx, length);
                 }
             } else {
-                discardedBytes = buffer.readableBytes();
+                discardedBytes += buffer.readableBytes();
                 buffer.readerIndex(buffer.writerIndex());
             }
             return null;
@@ -151,16 +156,17 @@ public class LineBasedFrameDecoder extends ByteToMessageDecoder {
      * Returns the index in the buffer of the end of line found.
      * Returns -1 if no end of line was found in the buffer.
      */
-    private static int findEndOfLine(final ByteBuf buffer) {
-        final int n = buffer.writerIndex();
-        for (int i = buffer.readerIndex(); i < n; i ++) {
-            final byte b = buffer.getByte(i);
-            if (b == '\n') {
-                return i;
-            } else if (b == '\r' && i < n - 1 && buffer.getByte(i + 1) == '\n') {
-                return i;  // \r\n
+    private int findEndOfLine(final ByteBuf buffer) {
+        int totalLength = buffer.readableBytes();
+        int i = buffer.forEachByte(buffer.readerIndex() + offset, totalLength - offset, ByteProcessor.FIND_LF);
+        if (i >= 0) {
+            offset = 0;
+            if (i > 0 && buffer.getByte(i - 1) == '\r') {
+                i--;
             }
+        } else {
+            offset = totalLength;
         }
-        return -1;  // Not found.
+        return i;
     }
 }

@@ -22,12 +22,12 @@ import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelPipeline;
 import io.netty.handler.codec.http.DefaultFullHttpResponse;
 import io.netty.handler.codec.http.FullHttpRequest;
-import io.netty.handler.codec.http.HttpHeaders;
+import io.netty.handler.codec.http.HttpHeaderNames;
 import io.netty.handler.codec.http.HttpRequest;
 import io.netty.handler.codec.http.HttpResponse;
 import io.netty.handler.ssl.SslHandler;
 
-import static io.netty.handler.codec.http.HttpHeaders.*;
+import static io.netty.handler.codec.http.HttpUtil.*;
 import static io.netty.handler.codec.http.HttpMethod.*;
 import static io.netty.handler.codec.http.HttpResponseStatus.*;
 import static io.netty.handler.codec.http.HttpVersion.*;
@@ -35,31 +35,47 @@ import static io.netty.handler.codec.http.HttpVersion.*;
 /**
  * Handles the HTTP handshake (the HTTP Upgrade request) for {@link WebSocketServerProtocolHandler}.
  */
-class WebSocketServerProtocolHandshakeHandler
-        extends ChannelInboundHandlerAdapter {
+class WebSocketServerProtocolHandshakeHandler extends ChannelInboundHandlerAdapter {
 
     private final String websocketPath;
     private final String subprotocols;
     private final boolean allowExtensions;
+    private final int maxFramePayloadSize;
+    private final boolean allowMaskMismatch;
+    private final boolean checkStartsWith;
 
     WebSocketServerProtocolHandshakeHandler(String websocketPath, String subprotocols,
-            boolean allowExtensions) {
+            boolean allowExtensions, int maxFrameSize, boolean allowMaskMismatch) {
+        this(websocketPath, subprotocols, allowExtensions, maxFrameSize, allowMaskMismatch, false);
+    }
+
+    WebSocketServerProtocolHandshakeHandler(String websocketPath, String subprotocols,
+            boolean allowExtensions, int maxFrameSize, boolean allowMaskMismatch, boolean checkStartsWith) {
         this.websocketPath = websocketPath;
         this.subprotocols = subprotocols;
         this.allowExtensions = allowExtensions;
+        maxFramePayloadSize = maxFrameSize;
+        this.allowMaskMismatch = allowMaskMismatch;
+        this.checkStartsWith = checkStartsWith;
     }
 
     @Override
     public void channelRead(final ChannelHandlerContext ctx, Object msg) throws Exception {
-        FullHttpRequest req = (FullHttpRequest) msg;
+        final FullHttpRequest req = (FullHttpRequest) msg;
+        if (isNotWebSocketPath(req)) {
+            ctx.fireChannelRead(msg);
+            return;
+        }
+
         try {
-            if (req.getMethod() != GET) {
+            if (req.method() != GET) {
                 sendHttpResponse(ctx, req, new DefaultFullHttpResponse(HTTP_1_1, FORBIDDEN));
                 return;
             }
 
             final WebSocketServerHandshakerFactory wsFactory = new WebSocketServerHandshakerFactory(
-                    getWebSocketLocation(ctx.pipeline(), req, websocketPath), subprotocols, allowExtensions);
+                    getWebSocketLocation(ctx.pipeline(), req, websocketPath), subprotocols,
+                            allowExtensions, maxFramePayloadSize, allowMaskMismatch);
             final WebSocketServerHandshaker handshaker = wsFactory.newHandshaker(req);
             if (handshaker == null) {
                 WebSocketServerHandshakerFactory.sendUnsupportedVersionResponse(ctx.channel());
@@ -71,12 +87,16 @@ class WebSocketServerProtocolHandshakeHandler
                         if (!future.isSuccess()) {
                             ctx.fireExceptionCaught(future.cause());
                         } else {
+                            // Kept for compatibility
                             ctx.fireUserEventTriggered(
                                     WebSocketServerProtocolHandler.ServerHandshakeStateEvent.HANDSHAKE_COMPLETE);
+                            ctx.fireUserEventTriggered(
+                                    new WebSocketServerProtocolHandler.HandshakeComplete(
+                                            req.uri(), req.headers(), handshaker.selectedSubprotocol()));
                         }
                     }
                 });
-                WebSocketServerProtocolHandler.setHandshaker(ctx, handshaker);
+                WebSocketServerProtocolHandler.setHandshaker(ctx.channel(), handshaker);
                 ctx.pipeline().replace(this, "WS403Responder",
                         WebSocketServerProtocolHandler.forbiddenHttpRequestResponder());
             }
@@ -85,9 +105,13 @@ class WebSocketServerProtocolHandshakeHandler
         }
     }
 
+    private boolean isNotWebSocketPath(FullHttpRequest req) {
+        return checkStartsWith ? !req.uri().startsWith(websocketPath) : !req.uri().equals(websocketPath);
+    }
+
     private static void sendHttpResponse(ChannelHandlerContext ctx, HttpRequest req, HttpResponse res) {
         ChannelFuture f = ctx.channel().writeAndFlush(res);
-        if (!isKeepAlive(req) || res.getStatus().code() != 200) {
+        if (!isKeepAlive(req) || res.status().code() != 200) {
             f.addListener(ChannelFutureListener.CLOSE);
         }
     }
@@ -98,7 +122,7 @@ class WebSocketServerProtocolHandshakeHandler
             // SSL in use so use Secure WebSockets
             protocol = "wss";
         }
-        return protocol + "://" + req.headers().get(HttpHeaders.Names.HOST) + path;
+        String host = req.headers().get(HttpHeaderNames.HOST);
+        return protocol + "://" + host + path;
     }
-
 }

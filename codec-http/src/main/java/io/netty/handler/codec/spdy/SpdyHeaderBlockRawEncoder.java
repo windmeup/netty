@@ -16,11 +16,13 @@
 package io.netty.handler.codec.spdy;
 
 import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufAllocator;
+import io.netty.buffer.ByteBufUtil;
 import io.netty.buffer.Unpooled;
 
 import java.util.Set;
 
-import static io.netty.handler.codec.spdy.SpdyCodecUtil.*;
+import static io.netty.handler.codec.spdy.SpdyCodecUtil.SPDY_MAX_NV_LENGTH;
 
 public class SpdyHeaderBlockRawEncoder extends SpdyHeaderBlockEncoder {
 
@@ -33,25 +35,17 @@ public class SpdyHeaderBlockRawEncoder extends SpdyHeaderBlockEncoder {
         this.version = version.getVersion();
     }
 
-    private void setLengthField(ByteBuf buffer, int writerIndex, int length) {
-        if (version < 3) {
-            buffer.setShort(writerIndex, length);
-        } else {
-            buffer.setInt(writerIndex, length);
-        }
+    private static void setLengthField(ByteBuf buffer, int writerIndex, int length) {
+        buffer.setInt(writerIndex, length);
     }
 
-    private void writeLengthField(ByteBuf buffer, int length) {
-        if (version < 3) {
-            buffer.writeShort(length);
-        } else {
-            buffer.writeInt(length);
-        }
+    private static void writeLengthField(ByteBuf buffer, int length) {
+        buffer.writeInt(length);
     }
 
     @Override
-    public ByteBuf encode(SpdyHeadersFrame frame) throws Exception {
-        Set<String> names = frame.headers().names();
+    public ByteBuf encode(ByteBufAllocator alloc, SpdyHeadersFrame frame) throws Exception {
+        Set<CharSequence> names = frame.headers().names();
         int numHeaders = names.size();
         if (numHeaders == 0) {
             return Unpooled.EMPTY_BUFFER;
@@ -60,29 +54,23 @@ public class SpdyHeaderBlockRawEncoder extends SpdyHeaderBlockEncoder {
             throw new IllegalArgumentException(
                     "header block contains too many headers");
         }
-        ByteBuf headerBlock = Unpooled.buffer();
+        ByteBuf headerBlock = alloc.heapBuffer();
         writeLengthField(headerBlock, numHeaders);
-        for (String name: names) {
-            byte[] nameBytes = name.getBytes("UTF-8");
-            writeLengthField(headerBlock, nameBytes.length);
-            headerBlock.writeBytes(nameBytes);
+        for (CharSequence name: names) {
+            writeLengthField(headerBlock, name.length());
+            ByteBufUtil.writeAscii(headerBlock, name);
             int savedIndex = headerBlock.writerIndex();
             int valueLength = 0;
             writeLengthField(headerBlock, valueLength);
-            for (String value: frame.headers().getAll(name)) {
-                byte[] valueBytes = value.getBytes("UTF-8");
-                if (valueBytes.length > 0) {
-                    headerBlock.writeBytes(valueBytes);
+            for (CharSequence value: frame.headers().getAll(name)) {
+                int length = value.length();
+                if (length > 0) {
+                    ByteBufUtil.writeAscii(headerBlock, value);
                     headerBlock.writeByte(0);
-                    valueLength += valueBytes.length + 1;
+                    valueLength += length + 1;
                 }
             }
-            if (valueLength == 0) {
-                if (version < 3) {
-                    throw new IllegalArgumentException(
-                            "header value cannot be empty: " + name);
-                }
-            } else {
+            if (valueLength != 0) {
                 valueLength --;
             }
             if (valueLength > SPDY_MAX_NV_LENGTH) {

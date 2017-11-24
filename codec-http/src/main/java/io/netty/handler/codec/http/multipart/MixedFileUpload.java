@@ -152,6 +152,11 @@ public class MixedFileUpload implements FileUpload {
     }
 
     @Override
+    public long definedLength() {
+        return fileUpload.definedLength();
+    }
+
+    @Override
     public boolean renameTo(File dest) throws IOException {
         return fileUpload.renameTo(dest);
     }
@@ -286,6 +291,16 @@ public class MixedFileUpload implements FileUpload {
     @Override
     public FileUpload duplicate() {
         return fileUpload.duplicate();
+    }
+
+    @Override
+    public FileUpload retainedDuplicate() {
+        return fileUpload.retainedDuplicate();
+    }
+
+    @Override
+    public FileUpload replace(ByteBuf content) {
+        return fileUpload.replace(content);
     }
 
     @Override

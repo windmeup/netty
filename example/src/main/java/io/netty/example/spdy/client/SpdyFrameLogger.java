@@ -45,30 +45,34 @@ public class SpdyFrameLogger extends ChannelDuplexHandler {
     }
 
     @Override
-    public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
+    public void channelRead(ChannelHandlerContext ctx, Object msg) {
         if (acceptMessage(msg)) {
             log((SpdyFrame) msg, Direction.INBOUND);
         }
-        super.channelRead(ctx, msg);
+        ctx.fireChannelRead(msg);
     }
 
     @Override
-    public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception {
+    public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) {
         if (acceptMessage(msg)) {
             log((SpdyFrame) msg, Direction.OUTBOUND);
         }
-        super.write(ctx, msg, promise);
+        ctx.write(msg, promise);
     }
 
-    private static boolean acceptMessage(Object msg) throws Exception {
+    private static boolean acceptMessage(Object msg) {
         return msg instanceof SpdyFrame;
     }
 
     private void log(SpdyFrame msg, Direction d) {
         if (logger.isEnabled(level)) {
-            StringBuilder b = new StringBuilder("\n----------------").append(d.name()).append("--------------------\n");
-            b.append(msg);
-            b.append("\n------------------------------------");
+            StringBuilder b = new StringBuilder(200)
+                .append("\n----------------")
+                .append(d.name())
+                .append("--------------------\n")
+                .append(msg)
+                .append("\n------------------------------------");
+
             logger.log(level, b.toString());
         }
     }

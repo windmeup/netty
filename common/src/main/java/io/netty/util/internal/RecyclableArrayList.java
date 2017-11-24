@@ -25,7 +25,7 @@ import java.util.List;
 import java.util.RandomAccess;
 
 /**
- * A simple list which is reyclable. This implementation does not allow {@code null} elements to be added.
+ * A simple list which is recyclable. This implementation does not allow {@code null} elements to be added.
  */
 public final class RecyclableArrayList extends ArrayList<Object> {
 
@@ -39,6 +39,8 @@ public final class RecyclableArrayList extends ArrayList<Object> {
             return new RecyclableArrayList(handle);
         }
     };
+
+    private boolean insertSinceRecycled;
 
     /**
      * Create a new empty {@link RecyclableArrayList} instance
@@ -70,13 +72,21 @@ public final class RecyclableArrayList extends ArrayList<Object> {
     @Override
     public boolean addAll(Collection<?> c) {
         checkNullElements(c);
-        return super.addAll(c);
+        if (super.addAll(c)) {
+            insertSinceRecycled = true;
+            return true;
+        }
+        return false;
     }
 
     @Override
     public boolean addAll(int index, Collection<?> c) {
         checkNullElements(c);
-        return super.addAll(index, c);
+        if (super.addAll(index, c)) {
+            insertSinceRecycled = true;
+            return true;
+        }
+        return false;
     }
 
     private static void checkNullElements(Collection<?> c) {
@@ -103,7 +113,11 @@ public final class RecyclableArrayList extends ArrayList<Object> {
         if (element == null) {
             throw new NullPointerException("element");
         }
-        return super.add(element);
+        if (super.add(element)) {
+            insertSinceRecycled = true;
+            return true;
+        }
+        return false;
     }
 
     @Override
@@ -112,6 +126,7 @@ public final class RecyclableArrayList extends ArrayList<Object> {
             throw new NullPointerException("element");
         }
         super.add(index, element);
+        insertSinceRecycled = true;
     }
 
     @Override
@@ -119,7 +134,16 @@ public final class RecyclableArrayList extends ArrayList<Object> {
         if (element == null) {
             throw new NullPointerException("element");
         }
-        return super.set(index, element);
+        Object old = super.set(index, element);
+        insertSinceRecycled = true;
+        return old;
+    }
+
+    /**
+     * Returns {@code true} if any elements where added or set. This will be reset once {@link #recycle()} was called.
+     */
+    public boolean insertSinceRecycled() {
+        return insertSinceRecycled;
     }
 
     /**
@@ -127,6 +151,8 @@ public final class RecyclableArrayList extends ArrayList<Object> {
      */
     public boolean recycle() {
         clear();
-        return RECYCLER.recycle(this, handle);
+        insertSinceRecycled = false;
+        handle.recycle(this);
+        return true;
     }
 }

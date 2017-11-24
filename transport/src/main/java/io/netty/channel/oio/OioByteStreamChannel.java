@@ -18,7 +18,9 @@ package io.netty.channel.oio;
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.Channel;
 import io.netty.channel.FileRegion;
+import io.netty.channel.RecvByteBufAllocator;
 
+import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -88,26 +90,23 @@ public abstract class OioByteStreamChannel extends AbstractOioByteChannel {
         }
 
         OutputStream os = this.os;
-        if (os == null || os == CLOSED_OUT) {
-            return false;
-        }
-
-        return true;
+        return !(os == null || os == CLOSED_OUT);
     }
 
     @Override
     protected int available() {
         try {
             return is.available();
-        } catch (IOException e) {
+        } catch (IOException ignored) {
             return 0;
         }
     }
 
     @Override
     protected int doReadBytes(ByteBuf buf) throws Exception {
-        int length = Math.max(1, Math.min(available(), buf.maxWritableBytes()));
-        return buf.writeBytes(is, length);
+        final RecvByteBufAllocator.Handle allocHandle = unsafe().recvBufAllocHandle();
+        allocHandle.attemptedBytesRead(Math.max(1, Math.min(available(), buf.maxWritableBytes())));
+        return buf.writeBytes(is, allocHandle.attemptedBytesRead());
     }
 
     @Override
@@ -141,6 +140,13 @@ public abstract class OioByteStreamChannel extends AbstractOioByteChannel {
             if (written >= region.count()) {
                 return;
             }
+        }
+    }
+
+    private static void checkEOF(FileRegion region) throws IOException {
+        if (region.transferred() < region.count()) {
+            throw new EOFException("Expected to be able to write " + region.count() + " bytes, " +
+                                   "but only wrote " + region.transferred());
         }
     }
 

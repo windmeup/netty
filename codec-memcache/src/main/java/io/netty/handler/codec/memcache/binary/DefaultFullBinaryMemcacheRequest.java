@@ -17,10 +17,12 @@ package io.netty.handler.codec.memcache.binary;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
+import io.netty.util.internal.UnstableApi;
 
 /**
  * The default implementation of a {@link FullBinaryMemcacheRequest}.
  */
+@UnstableApi
 public class DefaultFullBinaryMemcacheRequest extends DefaultBinaryMemcacheRequest
     implements FullBinaryMemcacheRequest {
 
@@ -29,30 +31,29 @@ public class DefaultFullBinaryMemcacheRequest extends DefaultBinaryMemcacheReque
     /**
      * Create a new {@link DefaultBinaryMemcacheRequest} with the header, key and extras.
      *
-     * @param header the header to use.
      * @param key    the key to use.
      * @param extras the extras to use.
      */
-    public DefaultFullBinaryMemcacheRequest(BinaryMemcacheRequestHeader header, String key, ByteBuf extras) {
-        this(header, key, extras, Unpooled.buffer(0));
+    public DefaultFullBinaryMemcacheRequest(ByteBuf key, ByteBuf extras) {
+        this(key, extras, Unpooled.buffer(0));
     }
 
     /**
      * Create a new {@link DefaultBinaryMemcacheRequest} with the header, key, extras and content.
      *
-     * @param header  the header to use.
      * @param key     the key to use.
      * @param extras  the extras to use.
      * @param content the content of the full request.
      */
-    public DefaultFullBinaryMemcacheRequest(BinaryMemcacheRequestHeader header, String key, ByteBuf extras,
+    public DefaultFullBinaryMemcacheRequest(ByteBuf key, ByteBuf extras,
                                             ByteBuf content) {
-        super(header, key, extras);
+        super(key, extras);
         if (content == null) {
             throw new NullPointerException("Supplied content is null.");
         }
 
         this.content = content;
+        setTotalBodyLength(keyLength() + extrasLength() + content.readableBytes());
     }
 
     @Override
@@ -61,51 +62,77 @@ public class DefaultFullBinaryMemcacheRequest extends DefaultBinaryMemcacheReque
     }
 
     @Override
-    public int refCnt() {
-        return content.refCnt();
-    }
-
-    @Override
     public FullBinaryMemcacheRequest retain() {
-        content.retain();
+        super.retain();
         return this;
     }
 
     @Override
     public FullBinaryMemcacheRequest retain(int increment) {
-        content.retain(increment);
+        super.retain(increment);
         return this;
     }
 
     @Override
     public FullBinaryMemcacheRequest touch() {
-        content.touch();
+        super.touch();
         return this;
     }
 
     @Override
     public FullBinaryMemcacheRequest touch(Object hint) {
+        super.touch(hint);
         content.touch(hint);
         return this;
     }
 
     @Override
-    public boolean release() {
-        return content.release();
-    }
-
-    @Override
-    public boolean release(int decrement) {
-        return content.release(decrement);
+    protected void deallocate() {
+        super.deallocate();
+        content.release();
     }
 
     @Override
     public FullBinaryMemcacheRequest copy() {
-        return new DefaultFullBinaryMemcacheRequest(getHeader(), getKey(), getExtras(), content().copy());
+        ByteBuf key = key();
+        if (key != null) {
+            key = key.copy();
+        }
+        ByteBuf extras = extras();
+        if (extras != null) {
+            extras = extras.copy();
+        }
+        return new DefaultFullBinaryMemcacheRequest(key, extras, content().copy());
     }
 
     @Override
     public FullBinaryMemcacheRequest duplicate() {
-        return new DefaultFullBinaryMemcacheRequest(getHeader(), getKey(), getExtras(), content().duplicate());
+        ByteBuf key = key();
+        if (key != null) {
+            key = key.duplicate();
+        }
+        ByteBuf extras = extras();
+        if (extras != null) {
+            extras = extras.duplicate();
+        }
+        return new DefaultFullBinaryMemcacheRequest(key, extras, content().duplicate());
+    }
+
+    @Override
+    public FullBinaryMemcacheRequest retainedDuplicate() {
+        return replace(content().retainedDuplicate());
+    }
+
+    @Override
+    public FullBinaryMemcacheRequest replace(ByteBuf content) {
+        ByteBuf key = key();
+        if (key != null) {
+            key = key.retainedDuplicate();
+        }
+        ByteBuf extras = extras();
+        if (extras != null) {
+            extras = extras.retainedDuplicate();
+        }
+        return new DefaultFullBinaryMemcacheRequest(key, extras, content);
     }
 }

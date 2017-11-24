@@ -24,7 +24,7 @@ import io.netty.handler.codec.http.FullHttpResponse;
 class WebSocketClientProtocolHandshakeHandler extends ChannelInboundHandlerAdapter {
     private final WebSocketClientHandshaker handshaker;
 
-    public WebSocketClientProtocolHandshakeHandler(WebSocketClientHandshaker handshaker) {
+    WebSocketClientProtocolHandshakeHandler(WebSocketClientHandshaker handshaker) {
         this.handshaker = handshaker;
     }
 
@@ -51,13 +51,18 @@ class WebSocketClientProtocolHandshakeHandler extends ChannelInboundHandlerAdapt
             return;
         }
 
-        if (!handshaker.isHandshakeComplete()) {
-            handshaker.finishHandshake(ctx.channel(), (FullHttpResponse) msg);
-            ctx.fireUserEventTriggered(
-                    WebSocketClientProtocolHandler.ClientHandshakeStateEvent.HANDSHAKE_COMPLETE);
-            ctx.pipeline().remove(this);
-            return;
+        FullHttpResponse response = (FullHttpResponse) msg;
+        try {
+            if (!handshaker.isHandshakeComplete()) {
+                handshaker.finishHandshake(ctx.channel(), response);
+                ctx.fireUserEventTriggered(
+                        WebSocketClientProtocolHandler.ClientHandshakeStateEvent.HANDSHAKE_COMPLETE);
+                ctx.pipeline().remove(this);
+                return;
+            }
+            throw new IllegalStateException("WebSocketClientHandshaker should have been non finished yet");
+        } finally {
+            response.release();
         }
-        throw new IllegalStateException("WebSocketClientHandshaker should have been non finished yet");
     }
 }

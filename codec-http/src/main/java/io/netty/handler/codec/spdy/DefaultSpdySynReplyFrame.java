@@ -32,6 +32,16 @@ public class DefaultSpdySynReplyFrame extends DefaultSpdyHeadersFrame
         super(streamId);
     }
 
+    /**
+     * Creates a new instance.
+     *
+     * @param streamId        the Stream-ID of this frame
+     * @param validateHeaders validate the header names and values when adding them to the {@link SpdyHeaders}
+     */
+    public DefaultSpdySynReplyFrame(int streamId, boolean validateHeaders) {
+        super(streamId, validateHeaders);
+    }
+
     @Override
     public SpdySynReplyFrame setStreamId(int streamId) {
         super.setStreamId(streamId);
@@ -52,17 +62,17 @@ public class DefaultSpdySynReplyFrame extends DefaultSpdyHeadersFrame
 
     @Override
     public String toString() {
-        StringBuilder buf = new StringBuilder();
-        buf.append(StringUtil.simpleClassName(this));
-        buf.append("(last: ");
-        buf.append(isLast());
-        buf.append(')');
-        buf.append(StringUtil.NEWLINE);
-        buf.append("--> Stream-ID = ");
-        buf.append(getStreamId());
-        buf.append(StringUtil.NEWLINE);
-        buf.append("--> Headers:");
-        buf.append(StringUtil.NEWLINE);
+        StringBuilder buf = new StringBuilder()
+            .append(StringUtil.simpleClassName(this))
+            .append("(last: ")
+            .append(isLast())
+            .append(')')
+            .append(StringUtil.NEWLINE)
+            .append("--> Stream-ID = ")
+            .append(streamId())
+            .append(StringUtil.NEWLINE)
+            .append("--> Headers:")
+            .append(StringUtil.NEWLINE);
         appendHeaders(buf);
 
         // Remove the last newline.

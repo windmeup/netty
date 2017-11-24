@@ -16,11 +16,14 @@
 package io.netty.handler.codec.memcache;
 
 import io.netty.handler.codec.DecoderResult;
+import io.netty.util.AbstractReferenceCounted;
+import io.netty.util.internal.UnstableApi;
 
 /**
  * The default {@link MemcacheObject} implementation.
  */
-public abstract class AbstractMemcacheObject implements MemcacheObject {
+@UnstableApi
+public abstract class AbstractMemcacheObject extends AbstractReferenceCounted implements MemcacheObject {
 
     private DecoderResult decoderResult = DecoderResult.SUCCESS;
 
@@ -29,7 +32,7 @@ public abstract class AbstractMemcacheObject implements MemcacheObject {
     }
 
     @Override
-    public DecoderResult getDecoderResult() {
+    public DecoderResult decoderResult() {
         return decoderResult;
     }
 
@@ -41,5 +44,4 @@ public abstract class AbstractMemcacheObject implements MemcacheObject {
 
         decoderResult = result;
     }
-
 }

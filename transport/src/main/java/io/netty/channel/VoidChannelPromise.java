@@ -18,10 +18,12 @@ package io.netty.channel;
 import io.netty.util.concurrent.AbstractFuture;
 import io.netty.util.concurrent.Future;
 import io.netty.util.concurrent.GenericFutureListener;
+import io.netty.util.internal.UnstableApi;
 
 import java.util.concurrent.TimeUnit;
 
-final class VoidChannelPromise extends AbstractFuture<Void> implements ChannelPromise {
+@UnstableApi
+public final class VoidChannelPromise extends AbstractFuture<Void> implements ChannelPromise {
 
     private final Channel channel;
     private final boolean fireException;
@@ -191,6 +193,27 @@ final class VoidChannelPromise extends AbstractFuture<Void> implements ChannelPr
     @Override
     public Void getNow() {
         return null;
+    }
+
+    @Override
+    public ChannelPromise unvoid() {
+        ChannelPromise promise = new DefaultChannelPromise(channel);
+        if (fireException) {
+            promise.addListener(new ChannelFutureListener() {
+                @Override
+                public void operationComplete(ChannelFuture future) throws Exception {
+                    if (!future.isSuccess()) {
+                        fireException(future.cause());
+                    }
+                }
+            });
+        }
+        return promise;
+    }
+
+    @Override
+    public boolean isVoid() {
+        return true;
     }
 
     private void fireException(Throwable cause) {

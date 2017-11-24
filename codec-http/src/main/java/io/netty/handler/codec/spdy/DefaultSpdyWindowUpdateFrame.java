@@ -37,7 +37,7 @@ public class DefaultSpdyWindowUpdateFrame implements SpdyWindowUpdateFrame {
     }
 
     @Override
-    public int getStreamId() {
+    public int streamId() {
         return streamId;
     }
 
@@ -52,7 +52,7 @@ public class DefaultSpdyWindowUpdateFrame implements SpdyWindowUpdateFrame {
     }
 
     @Override
-    public int getDeltaWindowSize() {
+    public int deltaWindowSize() {
         return deltaWindowSize;
     }
 
@@ -69,14 +69,14 @@ public class DefaultSpdyWindowUpdateFrame implements SpdyWindowUpdateFrame {
 
     @Override
     public String toString() {
-        StringBuilder buf = new StringBuilder();
-        buf.append(StringUtil.simpleClassName(this));
-        buf.append(StringUtil.NEWLINE);
-        buf.append("--> Stream-ID = ");
-        buf.append(getStreamId());
-        buf.append(StringUtil.NEWLINE);
-        buf.append("--> Delta-Window-Size = ");
-        buf.append(getDeltaWindowSize());
-        return buf.toString();
+        return new StringBuilder()
+            .append(StringUtil.simpleClassName(this))
+            .append(StringUtil.NEWLINE)
+            .append("--> Stream-ID = ")
+            .append(streamId())
+            .append(StringUtil.NEWLINE)
+            .append("--> Delta-Window-Size = ")
+            .append(deltaWindowSize())
+            .toString();
     }
 }

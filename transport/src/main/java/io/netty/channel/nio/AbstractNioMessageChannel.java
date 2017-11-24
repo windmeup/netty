@@ -19,9 +19,11 @@ import io.netty.channel.Channel;
 import io.netty.channel.ChannelConfig;
 import io.netty.channel.ChannelOutboundBuffer;
 import io.netty.channel.ChannelPipeline;
+import io.netty.channel.RecvByteBufAllocator;
 import io.netty.channel.ServerChannel;
 
 import java.io.IOException;
+import java.net.PortUnreachableException;
 import java.nio.channels.SelectableChannel;
 import java.nio.channels.SelectionKey;
 import java.util.ArrayList;
@@ -31,9 +33,10 @@ import java.util.List;
  * {@link AbstractNioChannel} base class for {@link Channel}s that operate on messages.
  */
 public abstract class AbstractNioMessageChannel extends AbstractNioChannel {
+    boolean inputShutdown;
 
     /**
-     * @see {@link AbstractNioChannel#AbstractNioChannel(Channel, SelectableChannel, int)}
+     * @see AbstractNioChannel#AbstractNioChannel(Channel, SelectableChannel, int)
      */
     protected AbstractNioMessageChannel(Channel parent, SelectableChannel ch, int readInterestOp) {
         super(parent, ch, readInterestOp);
@@ -44,30 +47,31 @@ public abstract class AbstractNioMessageChannel extends AbstractNioChannel {
         return new NioMessageUnsafe();
     }
 
+    @Override
+    protected void doBeginRead() throws Exception {
+        if (inputShutdown) {
+            return;
+        }
+        super.doBeginRead();
+    }
+
     private final class NioMessageUnsafe extends AbstractNioUnsafe {
 
         private final List<Object> readBuf = new ArrayList<Object>();
 
-        private void removeReadOp() {
-            SelectionKey key = selectionKey();
-            int interestOps = key.interestOps();
-            if ((interestOps & readInterestOp) != 0) {
-                // only remove readInterestOp if needed
-                key.interestOps(interestOps & ~readInterestOp);
-            }
-        }
         @Override
         public void read() {
             assert eventLoop().inEventLoop();
             final ChannelConfig config = config();
+            final ChannelPipeline pipeline = pipeline();
+            final RecvByteBufAllocator.Handle allocHandle = unsafe().recvBufAllocHandle();
+            allocHandle.reset(config);
 
+            boolean closed = false;
+            Throwable exception = null;
             try {
-                final int maxMessagesPerRead = config.getMaxMessagesPerRead();
-                final ChannelPipeline pipeline = pipeline();
-                boolean closed = false;
-                Throwable exception = null;
                 try {
-                    for (;;) {
+                    do {
                         int localRead = doReadMessages(readBuf);
                         if (localRead == 0) {
                             break;
@@ -77,43 +81,41 @@ public abstract class AbstractNioMessageChannel extends AbstractNioChannel {
                             break;
                         }
 
-                        // stop reading and remove op
-                        if (!config.isAutoRead()) {
-                            break;
-                        }
-
-                        if (readBuf.size() >= maxMessagesPerRead) {
-                            break;
-                        }
-                    }
+                        allocHandle.incMessagesRead(localRead);
+                    } while (allocHandle.continueReading());
                 } catch (Throwable t) {
                     exception = t;
                 }
 
                 int size = readBuf.size();
                 for (int i = 0; i < size; i ++) {
+                    readPending = false;
                     pipeline.fireChannelRead(readBuf.get(i));
                 }
                 readBuf.clear();
+                allocHandle.readComplete();
                 pipeline.fireChannelReadComplete();
 
                 if (exception != null) {
-                    if (exception instanceof IOException) {
-                        // ServerChannel should not be closed even on IOException because it can often continue
-                        // accepting incoming connections. (e.g. too many open files)
-                        closed = !(AbstractNioMessageChannel.this instanceof ServerChannel);
-                    }
+                    closed = closeOnReadError(exception);
 
                     pipeline.fireExceptionCaught(exception);
                 }
 
                 if (closed) {
+                    inputShutdown = true;
                     if (isOpen()) {
                         close(voidPromise());
                     }
                 }
             } finally {
-                if (!config().isAutoRead()) {
+                // Check if there is a readPending which was not processed yet.
+                // This could be for two reasons:
+                // * The user called Channel.read() or ChannelHandlerContext.read() in channelRead(...) method
+                // * The user called Channel.read() or ChannelHandlerContext.read() in channelReadComplete(...) method
+                //
+                // See https://github.com/netty/netty/issues/2254
+                if (!readPending && !config.isAutoRead()) {
                     removeReadOp();
                 }
             }
@@ -134,25 +136,47 @@ public abstract class AbstractNioMessageChannel extends AbstractNioChannel {
                 }
                 break;
             }
+            try {
+                boolean done = false;
+                for (int i = config().getWriteSpinCount() - 1; i >= 0; i--) {
+                    if (doWriteMessage(msg, in)) {
+                        done = true;
+                        break;
+                    }
+                }
 
-            boolean done = false;
-            for (int i = config().getWriteSpinCount() - 1; i >= 0; i --) {
-                if (doWriteMessage(msg, in)) {
-                    done = true;
+                if (done) {
+                    in.remove();
+                } else {
+                    // Did not write all messages.
+                    if ((interestOps & SelectionKey.OP_WRITE) == 0) {
+                        key.interestOps(interestOps | SelectionKey.OP_WRITE);
+                    }
                     break;
                 }
-            }
-
-            if (done) {
-                in.remove();
-            } else {
-                // Did not write all messages.
-                if ((interestOps & SelectionKey.OP_WRITE) == 0) {
-                    key.interestOps(interestOps | SelectionKey.OP_WRITE);
+            } catch (Exception e) {
+                if (continueOnWriteError()) {
+                    in.remove(e);
+                } else {
+                    throw e;
                 }
-                break;
             }
         }
+    }
+
+    /**
+     * Returns {@code true} if we should continue the write loop on a write error.
+     */
+    protected boolean continueOnWriteError() {
+        return false;
+    }
+
+    protected boolean closeOnReadError(Throwable cause) {
+        // ServerChannel should not be closed even on IOException because it can often continue
+        // accepting incoming connections. (e.g. too many open files)
+        return cause instanceof IOException &&
+                !(cause instanceof PortUnreachableException) &&
+                !(this instanceof ServerChannel);
     }
 
     /**

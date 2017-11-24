@@ -15,39 +15,26 @@
  */
 package io.netty.channel;
 
-import io.netty.buffer.ByteBuf;
-import io.netty.buffer.ByteBufAllocator;
-
-
 /**
  * The {@link RecvByteBufAllocator} that always yields the same buffer
  * size prediction.  This predictor ignores the feed back from the I/O thread.
  */
-public class FixedRecvByteBufAllocator implements RecvByteBufAllocator {
+public class FixedRecvByteBufAllocator extends DefaultMaxMessagesRecvByteBufAllocator {
 
-    private static final class HandleImpl implements Handle {
+    private final int bufferSize;
 
+    private final class HandleImpl extends MaxMessageHandle {
         private final int bufferSize;
 
-        HandleImpl(int bufferSize) {
+        public HandleImpl(int bufferSize) {
             this.bufferSize = bufferSize;
-        }
-
-        @Override
-        public ByteBuf allocate(ByteBufAllocator alloc) {
-            return alloc.ioBuffer(bufferSize);
         }
 
         @Override
         public int guess() {
             return bufferSize;
         }
-
-        @Override
-        public void record(int actualReadBytes) { }
     }
-
-    private final Handle handle;
 
     /**
      * Creates a new predictor that always returns the same prediction of
@@ -58,12 +45,12 @@ public class FixedRecvByteBufAllocator implements RecvByteBufAllocator {
             throw new IllegalArgumentException(
                     "bufferSize must greater than 0: " + bufferSize);
         }
-
-        handle = new HandleImpl(bufferSize);
+        this.bufferSize = bufferSize;
     }
 
+    @SuppressWarnings("deprecation")
     @Override
     public Handle newHandle() {
-        return handle;
+        return new HandleImpl(bufferSize);
     }
 }

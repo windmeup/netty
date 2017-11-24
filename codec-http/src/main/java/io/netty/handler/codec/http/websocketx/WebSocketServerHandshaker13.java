@@ -18,18 +18,18 @@ package io.netty.handler.codec.http.websocketx;
 import io.netty.handler.codec.http.DefaultFullHttpResponse;
 import io.netty.handler.codec.http.FullHttpRequest;
 import io.netty.handler.codec.http.FullHttpResponse;
+import io.netty.handler.codec.http.HttpHeaderNames;
+import io.netty.handler.codec.http.HttpHeaderValues;
 import io.netty.handler.codec.http.HttpHeaders;
-import io.netty.handler.codec.http.HttpHeaders.Names;
 import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.util.CharsetUtil;
 
-import static io.netty.handler.codec.http.HttpHeaders.Values.*;
 import static io.netty.handler.codec.http.HttpVersion.*;
 
 /**
  * <p>
- * Performs server side opening and closing handshakes for <a href="http://tools.ietf.org/html/rfc6455">RFC 6455</a>
- * (originally web socket specification <a href="http://goo.gl/zVBkL">draft-ietf-hybi-thewebsocketprotocol-17</a>).
+ * Performs server side opening and closing handshakes for <a href="http://netty.io/s/rfc6455">RFC 6455</a>
+ * (originally web socket specification <a href="http://netty.io/s/ws-17">draft-ietf-hybi-thewebsocketprotocol-17</a>).
  * </p>
  */
 public class WebSocketServerHandshaker13 extends WebSocketServerHandshaker {
@@ -37,6 +37,7 @@ public class WebSocketServerHandshaker13 extends WebSocketServerHandshaker {
     public static final String WEBSOCKET_13_ACCEPT_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
     private final boolean allowExtensions;
+    private final boolean allowMaskMismatch;
 
     /**
      * Constructor specifying the destination web socket location
@@ -54,8 +55,32 @@ public class WebSocketServerHandshaker13 extends WebSocketServerHandshaker {
      */
     public WebSocketServerHandshaker13(
             String webSocketURL, String subprotocols, boolean allowExtensions, int maxFramePayloadLength) {
+        this(webSocketURL, subprotocols, allowExtensions, maxFramePayloadLength, false);
+    }
+
+    /**
+     * Constructor specifying the destination web socket location
+     *
+     * @param webSocketURL
+     *        URL for web socket communications. e.g "ws://myhost.com/mypath". Subsequent web
+     *        socket frames will be sent to this URL.
+     * @param subprotocols
+     *        CSV of supported protocols
+     * @param allowExtensions
+     *        Allow extensions to be used in the reserved bits of the web socket frame
+     * @param maxFramePayloadLength
+     *        Maximum allowable frame payload length. Setting this value to your application's
+     *        requirement may reduce denial of service attacks using long data frames.
+     * @param allowMaskMismatch
+     *            When set to true, frames which are not masked properly according to the standard will still be
+     *            accepted.
+     */
+    public WebSocketServerHandshaker13(
+            String webSocketURL, String subprotocols, boolean allowExtensions, int maxFramePayloadLength,
+            boolean allowMaskMismatch) {
         super(WebSocketVersion.V13, webSocketURL, subprotocols, maxFramePayloadLength);
         this.allowExtensions = allowExtensions;
+        this.allowMaskMismatch = allowMaskMismatch;
     }
 
     /**
@@ -99,7 +124,7 @@ public class WebSocketServerHandshaker13 extends WebSocketServerHandshaker {
             res.headers().add(headers);
         }
 
-        String key = req.headers().get(Names.SEC_WEBSOCKET_KEY);
+        CharSequence key = req.headers().get(HttpHeaderNames.SEC_WEBSOCKET_KEY);
         if (key == null) {
             throw new WebSocketHandshakeException("not a WebSocket request: missing key");
         }
@@ -111,10 +136,11 @@ public class WebSocketServerHandshaker13 extends WebSocketServerHandshaker {
             logger.debug("WebSocket version 13 server handshake key: {}, response: {}", key, accept);
         }
 
-        res.headers().add(Names.UPGRADE, WEBSOCKET.toLowerCase());
-        res.headers().add(Names.CONNECTION, Names.UPGRADE);
-        res.headers().add(Names.SEC_WEBSOCKET_ACCEPT, accept);
-        String subprotocols = req.headers().get(Names.SEC_WEBSOCKET_PROTOCOL);
+        res.headers().add(HttpHeaderNames.UPGRADE, HttpHeaderValues.WEBSOCKET);
+        res.headers().add(HttpHeaderNames.CONNECTION, HttpHeaderValues.UPGRADE);
+        res.headers().add(HttpHeaderNames.SEC_WEBSOCKET_ACCEPT, accept);
+
+        String subprotocols = req.headers().get(HttpHeaderNames.SEC_WEBSOCKET_PROTOCOL);
         if (subprotocols != null) {
             String selectedSubprotocol = selectSubprotocol(subprotocols);
             if (selectedSubprotocol == null) {
@@ -122,7 +148,7 @@ public class WebSocketServerHandshaker13 extends WebSocketServerHandshaker {
                     logger.debug("Requested subprotocol(s) not supported: {}", subprotocols);
                 }
             } else {
-                res.headers().add(Names.SEC_WEBSOCKET_PROTOCOL, selectedSubprotocol);
+                res.headers().add(HttpHeaderNames.SEC_WEBSOCKET_PROTOCOL, selectedSubprotocol);
             }
         }
         return res;
@@ -130,7 +156,7 @@ public class WebSocketServerHandshaker13 extends WebSocketServerHandshaker {
 
     @Override
     protected WebSocketFrameDecoder newWebsocketDecoder() {
-        return new WebSocket13FrameDecoder(true, allowExtensions, maxFramePayloadLength());
+        return new WebSocket13FrameDecoder(true, allowExtensions, maxFramePayloadLength(), allowMaskMismatch);
     }
 
     @Override

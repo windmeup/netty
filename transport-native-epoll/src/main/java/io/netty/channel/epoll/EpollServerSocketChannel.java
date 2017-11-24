@@ -15,27 +15,48 @@
  */
 package io.netty.channel.epoll;
 
-import io.netty.channel.ChannelOutboundBuffer;
-import io.netty.channel.ChannelPipeline;
-import io.netty.channel.ChannelPromise;
+import io.netty.channel.Channel;
 import io.netty.channel.EventLoop;
 import io.netty.channel.socket.ServerSocketChannel;
-import io.netty.channel.socket.ServerSocketChannelConfig;
 
+import java.io.IOException;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Map;
+
+import static io.netty.channel.epoll.LinuxSocket.newSocketStream;
+import static io.netty.channel.unix.NativeInetAddress.address;
 
 /**
  * {@link ServerSocketChannel} implementation that uses linux EPOLL Edge-Triggered Mode for
  * maximal performance.
  */
-public final class EpollServerSocketChannel extends AbstractEpollChannel implements ServerSocketChannel {
+public final class EpollServerSocketChannel extends AbstractEpollServerChannel implements ServerSocketChannel {
 
     private final EpollServerSocketChannelConfig config;
-    private volatile InetSocketAddress local;
+    private volatile Collection<InetAddress> tcpMd5SigAddresses = Collections.emptyList();
 
     public EpollServerSocketChannel() {
-        super(Native.EPOLLACCEPT);
+        super(newSocketStream(), false);
+        config = new EpollServerSocketChannelConfig(this);
+    }
+
+    public EpollServerSocketChannel(int fd) {
+        // Must call this constructor to ensure this object's local address is configured correctly.
+        // The local address can only be obtained from a Socket object.
+        this(new LinuxSocket(fd));
+    }
+
+    EpollServerSocketChannel(LinuxSocket fd) {
+        super(fd);
+        config = new EpollServerSocketChannelConfig(this);
+    }
+
+    EpollServerSocketChannel(LinuxSocket fd, boolean active) {
+        super(fd, active);
         config = new EpollServerSocketChannelConfig(this);
     }
 
@@ -46,79 +67,39 @@ public final class EpollServerSocketChannel extends AbstractEpollChannel impleme
 
     @Override
     protected void doBind(SocketAddress localAddress) throws Exception {
-        InetSocketAddress addr = (InetSocketAddress) localAddress;
-        Native.bind(fd, addr.getAddress(), addr.getPort());
-        local = addr;
-        Native.listen(fd, config.getBacklog());
+        super.doBind(localAddress);
+        if (Native.IS_SUPPORTING_TCP_FASTOPEN && config.getTcpFastopen() > 0) {
+            socket.setTcpFastOpen(config.getTcpFastopen());
+        }
+        socket.listen(config.getBacklog());
         active = true;
     }
 
     @Override
-    public ServerSocketChannelConfig config() {
+    public InetSocketAddress remoteAddress() {
+        return (InetSocketAddress) super.remoteAddress();
+    }
+
+    @Override
+    public InetSocketAddress localAddress() {
+        return (InetSocketAddress) super.localAddress();
+    }
+
+    @Override
+    public EpollServerSocketChannelConfig config() {
         return config;
     }
 
     @Override
-    protected InetSocketAddress localAddress0() {
-        return local;
+    protected Channel newChildChannel(int fd, byte[] address, int offset, int len) throws Exception {
+        return new EpollSocketChannel(this, new LinuxSocket(fd), address(address, offset, len));
     }
 
-    @Override
-    protected InetSocketAddress remoteAddress0() {
-        return null;
+    Collection<InetAddress> tcpMd5SigAddresses() {
+        return tcpMd5SigAddresses;
     }
 
-    @Override
-    protected AbstractEpollUnsafe newUnsafe() {
-        return new EpollServerSocketUnsafe();
-    }
-
-    @Override
-    protected void doWrite(ChannelOutboundBuffer in) {
-        throw new UnsupportedOperationException();
-    }
-
-    final class EpollServerSocketUnsafe extends AbstractEpollUnsafe {
-        @Override
-        public void connect(SocketAddress socketAddress, SocketAddress socketAddress2, ChannelPromise channelPromise) {
-            // Connect not supported by ServerChannel implementations
-            channelPromise.setFailure(new UnsupportedOperationException());
-        }
-
-        @Override
-        void epollInReady() {
-            assert eventLoop().inEventLoop();
-            try {
-                final ChannelPipeline pipeline = pipeline();
-                Throwable exception = null;
-                try {
-                    for (;;) {
-                        int socketFd = Native.accept(fd);
-                        if (socketFd == -1) {
-                            // this means everything was handled for now
-                            break;
-                        }
-                        try {
-                            pipeline.fireChannelRead(new EpollSocketChannel(EpollServerSocketChannel.this, socketFd));
-                        } catch (Throwable t) {
-                            // keep on reading as we use epoll ET and need to consume everything from the socket
-                            pipeline.fireChannelReadComplete();
-                            pipeline.fireExceptionCaught(t);
-                        }
-                    }
-                } catch (Throwable t) {
-                    exception = t;
-                }
-                pipeline.fireChannelReadComplete();
-
-                if (exception != null) {
-                    pipeline.fireExceptionCaught(exception);
-                }
-            } finally {
-                if (!config().isAutoRead()) {
-                    clearEpollIn();
-                }
-            }
-        }
+    void setTcpMd5Sig(Map<InetAddress, byte[]> keys) throws IOException {
+        tcpMd5SigAddresses = TcpMd5Util.newTcpMd5Sigs(this, tcpMd5SigAddresses, keys);
     }
 }

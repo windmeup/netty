@@ -16,48 +16,50 @@
 package io.netty.channel.epoll;
 
 import io.netty.buffer.ByteBufAllocator;
+import io.netty.channel.ChannelException;
 import io.netty.channel.ChannelOption;
-import io.netty.channel.DefaultChannelConfig;
 import io.netty.channel.MessageSizeEstimator;
 import io.netty.channel.RecvByteBufAllocator;
+import io.netty.channel.WriteBufferWaterMark;
 import io.netty.channel.socket.ServerSocketChannelConfig;
-import io.netty.util.NetUtil;
 
+import java.io.IOException;
+import java.net.InetAddress;
 import java.util.Map;
 
-import static io.netty.channel.ChannelOption.SO_BACKLOG;
-import static io.netty.channel.ChannelOption.SO_RCVBUF;
-import static io.netty.channel.ChannelOption.SO_REUSEADDR;
-
-final class EpollServerSocketChannelConfig extends DefaultChannelConfig
+public final class EpollServerSocketChannelConfig extends EpollServerChannelConfig
         implements ServerSocketChannelConfig {
-
-    private final EpollServerSocketChannel channel;
-    private volatile int backlog = NetUtil.SOMAXCONN;
 
     EpollServerSocketChannelConfig(EpollServerSocketChannel channel) {
         super(channel);
-        this.channel = channel;
+
+        // Use SO_REUSEADDR by default as java.nio does the same.
+        //
+        // See https://github.com/netty/netty/issues/2605
+        setReuseAddress(true);
     }
 
     @Override
     public Map<ChannelOption<?>, Object> getOptions() {
-        return getOptions(super.getOptions(), SO_RCVBUF, SO_REUSEADDR, SO_BACKLOG);
+        return getOptions(super.getOptions(), EpollChannelOption.SO_REUSEPORT, EpollChannelOption.IP_FREEBIND,
+            EpollChannelOption.IP_TRANSPARENT, EpollChannelOption.TCP_DEFER_ACCEPT);
     }
 
     @SuppressWarnings("unchecked")
     @Override
     public <T> T getOption(ChannelOption<T> option) {
-        if (option == SO_RCVBUF) {
-            return (T) Integer.valueOf(getReceiveBufferSize());
+        if (option == EpollChannelOption.SO_REUSEPORT) {
+            return (T) Boolean.valueOf(isReusePort());
         }
-        if (option == SO_REUSEADDR) {
-            return (T) Boolean.valueOf(isReuseAddress());
+        if (option == EpollChannelOption.IP_FREEBIND) {
+            return (T) Boolean.valueOf(isFreeBind());
         }
-        if (option == SO_BACKLOG) {
-            return (T) Integer.valueOf(getBacklog());
+        if (option == EpollChannelOption.IP_TRANSPARENT) {
+            return (T) Boolean.valueOf(isIpTransparent());
         }
-
+        if (option == EpollChannelOption.TCP_DEFER_ACCEPT) {
+            return (T) Integer.valueOf(getTcpDeferAccept());
+        }
         return super.getOption(option);
     }
 
@@ -65,12 +67,18 @@ final class EpollServerSocketChannelConfig extends DefaultChannelConfig
     public <T> boolean setOption(ChannelOption<T> option, T value) {
         validate(option, value);
 
-        if (option == SO_RCVBUF) {
-            setReceiveBufferSize((Integer) value);
-        } else if (option == SO_REUSEADDR) {
-            setReuseAddress((Boolean) value);
-        } else if (option == SO_BACKLOG) {
-            setBacklog((Integer) value);
+        if (option == EpollChannelOption.SO_REUSEPORT) {
+            setReusePort((Boolean) value);
+        } else if (option == EpollChannelOption.IP_FREEBIND) {
+            setFreeBind((Boolean) value);
+        } else if (option == EpollChannelOption.IP_TRANSPARENT) {
+            setIpTransparent((Boolean) value);
+        } else if (option == EpollChannelOption.TCP_MD5SIG) {
+            @SuppressWarnings("unchecked")
+            final Map<InetAddress, byte[]> m = (Map<InetAddress, byte[]>) value;
+            setTcpMd5Sig(m);
+        } else if (option == EpollChannelOption.TCP_DEFER_ACCEPT) {
+            setTcpDeferAccept((Integer) value);
         } else {
             return super.setOption(option, value);
         }
@@ -79,98 +87,202 @@ final class EpollServerSocketChannelConfig extends DefaultChannelConfig
     }
 
     @Override
-    public boolean isReuseAddress() {
-        return Native.isReuseAddress(channel.fd) == 1;
-    }
-
-    @Override
-    public ServerSocketChannelConfig setReuseAddress(boolean reuseAddress) {
-        Native.setReuseAddress(channel.fd, reuseAddress ? 1 : 0);
+    public EpollServerSocketChannelConfig setReuseAddress(boolean reuseAddress) {
+        super.setReuseAddress(reuseAddress);
         return this;
     }
 
     @Override
-    public int getReceiveBufferSize() {
-        return Native.getReceiveBufferSize(channel.fd);
-    }
-
-    @Override
-    public ServerSocketChannelConfig setReceiveBufferSize(int receiveBufferSize) {
-        Native.setReceiveBufferSize(channel.fd, receiveBufferSize);
-
+    public EpollServerSocketChannelConfig setReceiveBufferSize(int receiveBufferSize) {
+        super.setReceiveBufferSize(receiveBufferSize);
         return this;
     }
 
     @Override
-    public ServerSocketChannelConfig setPerformancePreferences(int connectionTime, int latency, int bandwidth) {
+    public EpollServerSocketChannelConfig setPerformancePreferences(int connectionTime, int latency, int bandwidth) {
         return this;
     }
 
     @Override
-    public int getBacklog() {
-        return backlog;
-    }
-
-    @Override
-    public ServerSocketChannelConfig setBacklog(int backlog) {
-        if (backlog < 0) {
-            throw new IllegalArgumentException("backlog: " + backlog);
-        }
-        this.backlog = backlog;
+    public EpollServerSocketChannelConfig setBacklog(int backlog) {
+        super.setBacklog(backlog);
         return this;
     }
 
     @Override
-    public ServerSocketChannelConfig setConnectTimeoutMillis(int connectTimeoutMillis) {
+    public EpollServerSocketChannelConfig setConnectTimeoutMillis(int connectTimeoutMillis) {
         super.setConnectTimeoutMillis(connectTimeoutMillis);
         return this;
     }
 
     @Override
-    public ServerSocketChannelConfig setMaxMessagesPerRead(int maxMessagesPerRead) {
+    @Deprecated
+    public EpollServerSocketChannelConfig setMaxMessagesPerRead(int maxMessagesPerRead) {
         super.setMaxMessagesPerRead(maxMessagesPerRead);
         return this;
     }
 
     @Override
-    public ServerSocketChannelConfig setWriteSpinCount(int writeSpinCount) {
+    public EpollServerSocketChannelConfig setWriteSpinCount(int writeSpinCount) {
         super.setWriteSpinCount(writeSpinCount);
         return this;
     }
 
     @Override
-    public ServerSocketChannelConfig setAllocator(ByteBufAllocator allocator) {
+    public EpollServerSocketChannelConfig setAllocator(ByteBufAllocator allocator) {
         super.setAllocator(allocator);
         return this;
     }
 
     @Override
-    public ServerSocketChannelConfig setRecvByteBufAllocator(RecvByteBufAllocator allocator) {
+    public EpollServerSocketChannelConfig setRecvByteBufAllocator(RecvByteBufAllocator allocator) {
         super.setRecvByteBufAllocator(allocator);
         return this;
     }
 
     @Override
-    public ServerSocketChannelConfig setAutoRead(boolean autoRead) {
+    public EpollServerSocketChannelConfig setAutoRead(boolean autoRead) {
         super.setAutoRead(autoRead);
         return this;
     }
 
     @Override
-    public ServerSocketChannelConfig setWriteBufferHighWaterMark(int writeBufferHighWaterMark) {
+    @Deprecated
+    public EpollServerSocketChannelConfig setWriteBufferHighWaterMark(int writeBufferHighWaterMark) {
         super.setWriteBufferHighWaterMark(writeBufferHighWaterMark);
         return this;
     }
 
     @Override
-    public ServerSocketChannelConfig setWriteBufferLowWaterMark(int writeBufferLowWaterMark) {
+    @Deprecated
+    public EpollServerSocketChannelConfig setWriteBufferLowWaterMark(int writeBufferLowWaterMark) {
         super.setWriteBufferLowWaterMark(writeBufferLowWaterMark);
         return this;
     }
 
     @Override
-    public ServerSocketChannelConfig setMessageSizeEstimator(MessageSizeEstimator estimator) {
+    public EpollServerSocketChannelConfig setWriteBufferWaterMark(WriteBufferWaterMark writeBufferWaterMark) {
+        super.setWriteBufferWaterMark(writeBufferWaterMark);
+        return this;
+    }
+
+    @Override
+    public EpollServerSocketChannelConfig setMessageSizeEstimator(MessageSizeEstimator estimator) {
         super.setMessageSizeEstimator(estimator);
         return this;
+    }
+
+    /**
+     * Set the {@code TCP_MD5SIG} option on the socket. See {@code linux/tcp.h} for more details.
+     * Keys can only be set on, not read to prevent a potential leak, as they are confidential.
+     * Allowing them being read would mean anyone with access to the channel could get them.
+     */
+    public EpollServerSocketChannelConfig setTcpMd5Sig(Map<InetAddress, byte[]> keys) {
+        try {
+            ((EpollServerSocketChannel) channel).setTcpMd5Sig(keys);
+            return this;
+        } catch (IOException e) {
+            throw new ChannelException(e);
+        }
+    }
+
+    /**
+     * Returns {@code true} if the SO_REUSEPORT option is set.
+     */
+    public boolean isReusePort() {
+        try {
+            return channel.socket.isReusePort();
+        } catch (IOException e) {
+            throw new ChannelException(e);
+        }
+    }
+
+    /**
+     * Set the SO_REUSEPORT option on the underlying Channel. This will allow to bind multiple
+     * {@link EpollSocketChannel}s to the same port and so accept connections with multiple threads.
+     *
+     * Be aware this method needs be called before {@link EpollSocketChannel#bind(java.net.SocketAddress)} to have
+     * any affect.
+     */
+    public EpollServerSocketChannelConfig setReusePort(boolean reusePort) {
+        try {
+            channel.socket.setReusePort(reusePort);
+            return this;
+        } catch (IOException e) {
+            throw new ChannelException(e);
+        }
+    }
+
+    /**
+     * Returns {@code true} if <a href="http://man7.org/linux/man-pages/man7/ip.7.html">IP_FREEBIND</a> is enabled,
+     * {@code false} otherwise.
+     */
+    public boolean isFreeBind() {
+        try {
+            return channel.socket.isIpFreeBind();
+        } catch (IOException e) {
+            throw new ChannelException(e);
+        }
+    }
+
+    /**
+     * If {@code true} is used <a href="http://man7.org/linux/man-pages/man7/ip.7.html">IP_FREEBIND</a> is enabled,
+     * {@code false} for disable it. Default is disabled.
+     */
+    public EpollServerSocketChannelConfig setFreeBind(boolean freeBind) {
+        try {
+            channel.socket.setIpFreeBind(freeBind);
+            return this;
+        } catch (IOException e) {
+            throw new ChannelException(e);
+        }
+    }
+
+    /**
+     * Returns {@code true} if <a href="http://man7.org/linux/man-pages/man7/ip.7.html">IP_TRANSPARENT</a> is enabled,
+     * {@code false} otherwise.
+     */
+    public boolean isIpTransparent() {
+        try {
+            return channel.socket.isIpTransparent();
+        } catch (IOException e) {
+            throw new ChannelException(e);
+        }
+    }
+
+    /**
+     * If {@code true} is used <a href="http://man7.org/linux/man-pages/man7/ip.7.html">IP_TRANSPARENT</a> is enabled,
+     * {@code false} for disable it. Default is disabled.
+     */
+    public EpollServerSocketChannelConfig setIpTransparent(boolean transparent) {
+        try {
+            channel.socket.setIpTransparent(transparent);
+            return this;
+        } catch (IOException e) {
+            throw new ChannelException(e);
+        }
+    }
+
+    /**
+     * Set the {@code TCP_DEFER_ACCEPT} option on the socket. See {@code man 7 tcp} for more details.
+     */
+    public EpollServerSocketChannelConfig setTcpDeferAccept(int deferAccept) {
+        try {
+            channel.socket.setTcpDeferAccept(deferAccept);
+            return this;
+        } catch (IOException e) {
+            throw new ChannelException(e);
+        }
+    }
+
+    /**
+     * Returns a positive value if <a href="http://linux.die.net/man/7/tcp">TCP_DEFER_ACCEPT</a> is enabled.
+     */
+    public int getTcpDeferAccept() {
+        try {
+            return channel.socket.getTcpDeferAccept();
+        } catch (IOException e) {
+            throw new ChannelException(e);
+        }
     }
 }

@@ -56,7 +56,7 @@ public class DefaultSpdyGoAwayFrame implements SpdyGoAwayFrame {
     }
 
     @Override
-    public int getLastGoodStreamId() {
+    public int lastGoodStreamId() {
         return lastGoodStreamId;
     }
 
@@ -71,7 +71,7 @@ public class DefaultSpdyGoAwayFrame implements SpdyGoAwayFrame {
     }
 
     @Override
-    public SpdySessionStatus getStatus() {
+    public SpdySessionStatus status() {
         return status;
     }
 
@@ -83,14 +83,14 @@ public class DefaultSpdyGoAwayFrame implements SpdyGoAwayFrame {
 
     @Override
     public String toString() {
-        StringBuilder buf = new StringBuilder();
-        buf.append(StringUtil.simpleClassName(this));
-        buf.append(StringUtil.NEWLINE);
-        buf.append("--> Last-good-stream-ID = ");
-        buf.append(getLastGoodStreamId());
-        buf.append(StringUtil.NEWLINE);
-        buf.append("--> Status: ");
-        buf.append(getStatus().toString());
-        return buf.toString();
+        return new StringBuilder()
+            .append(StringUtil.simpleClassName(this))
+            .append(StringUtil.NEWLINE)
+            .append("--> Last-good-stream-ID = ")
+            .append(lastGoodStreamId())
+            .append(StringUtil.NEWLINE)
+            .append("--> Status: ")
+            .append(status())
+            .toString();
     }
 }

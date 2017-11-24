@@ -27,9 +27,7 @@ import io.netty.channel.ChannelOption;
 import io.netty.channel.ChannelPipeline;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.ServerChannel;
-import io.netty.channel.socket.SocketChannel;
 import io.netty.util.AttributeKey;
-import io.netty.util.internal.StringUtil;
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
 
@@ -42,12 +40,13 @@ import java.util.concurrent.TimeUnit;
  * {@link Bootstrap} sub-class which allows easy bootstrap of {@link ServerChannel}
  *
  */
-public final class ServerBootstrap extends AbstractBootstrap<ServerBootstrap, ServerChannel> {
+public class ServerBootstrap extends AbstractBootstrap<ServerBootstrap, ServerChannel> {
 
     private static final InternalLogger logger = InternalLoggerFactory.getInstance(ServerBootstrap.class);
 
     private final Map<ChannelOption<?>, Object> childOptions = new LinkedHashMap<ChannelOption<?>, Object>();
     private final Map<AttributeKey<?>, Object> childAttrs = new LinkedHashMap<AttributeKey<?>, Object>();
+    private final ServerBootstrapConfig config = new ServerBootstrapConfig(this);
     private volatile EventLoopGroup childGroup;
     private volatile ChannelHandler childHandler;
 
@@ -75,7 +74,7 @@ public final class ServerBootstrap extends AbstractBootstrap<ServerBootstrap, Se
 
     /**
      * Set the {@link EventLoopGroup} for the parent (acceptor) and the child (client). These
-     * {@link EventLoopGroup}'s are used to handle all the events and IO for {@link SocketChannel} and
+     * {@link EventLoopGroup}'s are used to handle all the events and IO for {@link ServerChannel} and
      * {@link Channel}'s.
      */
     public ServerBootstrap group(EventLoopGroup parentGroup, EventLoopGroup childGroup) {
@@ -138,22 +137,14 @@ public final class ServerBootstrap extends AbstractBootstrap<ServerBootstrap, Se
         return this;
     }
 
-    /**
-     * Return the configured {@link EventLoopGroup} which will be used for the child channels or {@code null}
-     * if non is configured yet.
-     */
-    public EventLoopGroup childGroup() {
-        return childGroup;
-    }
-
     @Override
     void init(Channel channel) throws Exception {
-        final Map<ChannelOption<?>, Object> options = options();
+        final Map<ChannelOption<?>, Object> options = options0();
         synchronized (options) {
-            channel.config().setOptions(options);
+            setChannelOptions(channel, options, logger);
         }
 
-        final Map<AttributeKey<?>, Object> attrs = attrs();
+        final Map<AttributeKey<?>, Object> attrs = attrs0();
         synchronized (attrs) {
             for (Entry<AttributeKey<?>, Object> e: attrs.entrySet()) {
                 @SuppressWarnings("unchecked")
@@ -163,9 +154,6 @@ public final class ServerBootstrap extends AbstractBootstrap<ServerBootstrap, Se
         }
 
         ChannelPipeline p = channel.pipeline();
-        if (handler() != null) {
-            p.addLast(handler());
-        }
 
         final EventLoopGroup currentChildGroup = childGroup;
         final ChannelHandler currentChildHandler = childHandler;
@@ -180,9 +168,20 @@ public final class ServerBootstrap extends AbstractBootstrap<ServerBootstrap, Se
 
         p.addLast(new ChannelInitializer<Channel>() {
             @Override
-            public void initChannel(Channel ch) throws Exception {
-                ch.pipeline().addLast(new ServerBootstrapAcceptor(
-                        currentChildGroup, currentChildHandler, currentChildOptions, currentChildAttrs));
+            public void initChannel(final Channel ch) throws Exception {
+                final ChannelPipeline pipeline = ch.pipeline();
+                ChannelHandler handler = config.handler();
+                if (handler != null) {
+                    pipeline.addLast(handler);
+                }
+
+                ch.eventLoop().execute(new Runnable() {
+                    @Override
+                    public void run() {
+                        pipeline.addLast(new ServerBootstrapAcceptor(
+                                ch, currentChildGroup, currentChildHandler, currentChildOptions, currentChildAttrs));
+                    }
+                });
             }
         });
     }
@@ -195,19 +194,19 @@ public final class ServerBootstrap extends AbstractBootstrap<ServerBootstrap, Se
         }
         if (childGroup == null) {
             logger.warn("childGroup is not set. Using parentGroup instead.");
-            childGroup = group();
+            childGroup = config.group();
         }
         return this;
     }
 
     @SuppressWarnings("unchecked")
-    private static Entry<ChannelOption<?>, Object>[] newOptionArray(int size) {
+    private static Entry<AttributeKey<?>, Object>[] newAttrArray(int size) {
         return new Entry[size];
     }
 
     @SuppressWarnings("unchecked")
-    private static Entry<AttributeKey<?>, Object>[] newAttrArray(int size) {
-        return new Entry[size];
+    private static Map.Entry<ChannelOption<?>, Object>[] newOptionArray(int size) {
+        return new Map.Entry[size];
     }
 
     private static class ServerBootstrapAcceptor extends ChannelInboundHandlerAdapter {
@@ -216,15 +215,27 @@ public final class ServerBootstrap extends AbstractBootstrap<ServerBootstrap, Se
         private final ChannelHandler childHandler;
         private final Entry<ChannelOption<?>, Object>[] childOptions;
         private final Entry<AttributeKey<?>, Object>[] childAttrs;
+        private final Runnable enableAutoReadTask;
 
-        @SuppressWarnings("unchecked")
         ServerBootstrapAcceptor(
-                EventLoopGroup childGroup, ChannelHandler childHandler,
+                final Channel channel, EventLoopGroup childGroup, ChannelHandler childHandler,
                 Entry<ChannelOption<?>, Object>[] childOptions, Entry<AttributeKey<?>, Object>[] childAttrs) {
             this.childGroup = childGroup;
             this.childHandler = childHandler;
             this.childOptions = childOptions;
             this.childAttrs = childAttrs;
+
+            // Task which is scheduled to re-enable auto-read.
+            // It's important to create this Runnable before we try to submit it as otherwise the URLClassLoader may
+            // not be able to load the class because of the file limit it already reached.
+            //
+            // See https://github.com/netty/netty/issues/1328
+            enableAutoReadTask = new Runnable() {
+                @Override
+                public void run() {
+                    channel.config().setAutoRead(true);
+                }
+            };
         }
 
         @Override
@@ -234,15 +245,7 @@ public final class ServerBootstrap extends AbstractBootstrap<ServerBootstrap, Se
 
             child.pipeline().addLast(childHandler);
 
-            for (Entry<ChannelOption<?>, Object> e: childOptions) {
-                try {
-                    if (!child.config().setOption((ChannelOption<Object>) e.getKey(), e.getValue())) {
-                        logger.warn("Unknown channel option: " + e);
-                    }
-                } catch (Throwable t) {
-                    logger.warn("Failed to set a channel option: " + child, t);
-                }
-            }
+            setChannelOptions(child, childOptions, logger);
 
             for (Entry<AttributeKey<?>, Object> e: childAttrs) {
                 child.attr((AttributeKey<Object>) e.getKey()).set(e.getValue());
@@ -264,7 +267,7 @@ public final class ServerBootstrap extends AbstractBootstrap<ServerBootstrap, Se
 
         private static void forceClose(Channel child, Throwable t) {
             child.unsafe().closeForcibly();
-            logger.warn("Failed to register an accepted channel: " + child, t);
+            logger.warn("Failed to register an accepted channel: {}", child, t);
         }
 
         @Override
@@ -274,12 +277,7 @@ public final class ServerBootstrap extends AbstractBootstrap<ServerBootstrap, Se
                 // stop accept new connections for 1 second to allow the channel to recover
                 // See https://github.com/netty/netty/issues/1328
                 config.setAutoRead(false);
-                ctx.channel().eventLoop().schedule(new Runnable() {
-                    @Override
-                    public void run() {
-                       config.setAutoRead(true);
-                    }
-                }, 1, TimeUnit.SECONDS);
+                ctx.channel().eventLoop().schedule(enableAutoReadTask, 1, TimeUnit.SECONDS);
             }
             // still let the exceptionCaught event flow through the pipeline to give the user
             // a chance to do something with it
@@ -293,42 +291,31 @@ public final class ServerBootstrap extends AbstractBootstrap<ServerBootstrap, Se
         return new ServerBootstrap(this);
     }
 
-    @Override
-    public String toString() {
-        StringBuilder buf = new StringBuilder(super.toString());
-        buf.setLength(buf.length() - 1);
-        buf.append(", ");
-        if (childGroup != null) {
-            buf.append("childGroup: ");
-            buf.append(StringUtil.simpleClassName(childGroup));
-            buf.append(", ");
-        }
-        synchronized (childOptions) {
-            if (!childOptions.isEmpty()) {
-                buf.append("childOptions: ");
-                buf.append(childOptions);
-                buf.append(", ");
-            }
-        }
-        synchronized (childAttrs) {
-            if (!childAttrs.isEmpty()) {
-                buf.append("childAttrs: ");
-                buf.append(childAttrs);
-                buf.append(", ");
-            }
-        }
-        if (childHandler != null) {
-            buf.append("childHandler: ");
-            buf.append(childHandler);
-            buf.append(", ");
-        }
-        if (buf.charAt(buf.length() - 1) == '(') {
-            buf.append(')');
-        } else {
-            buf.setCharAt(buf.length() - 2, ')');
-            buf.setLength(buf.length() - 1);
-        }
+    /**
+     * Return the configured {@link EventLoopGroup} which will be used for the child channels or {@code null}
+     * if non is configured yet.
+     *
+     * @deprecated Use {@link #config()} instead.
+     */
+    @Deprecated
+    public EventLoopGroup childGroup() {
+        return childGroup;
+    }
 
-        return buf.toString();
+    final ChannelHandler childHandler() {
+        return childHandler;
+    }
+
+    final Map<ChannelOption<?>, Object> childOptions() {
+        return copiedMap(childOptions);
+    }
+
+    final Map<AttributeKey<?>, Object> childAttrs() {
+        return copiedMap(childAttrs);
+    }
+
+    @Override
+    public final ServerBootstrapConfig config() {
+        return config;
     }
 }

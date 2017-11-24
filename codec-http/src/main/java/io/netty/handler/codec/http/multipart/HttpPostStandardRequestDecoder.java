@@ -20,7 +20,7 @@ import io.netty.handler.codec.http.HttpConstants;
 import io.netty.handler.codec.http.HttpContent;
 import io.netty.handler.codec.http.HttpRequest;
 import io.netty.handler.codec.http.LastHttpContent;
-import io.netty.handler.codec.http.multipart.HttpPostBodyUtil.SeekAheadNoBackArrayException;
+import io.netty.handler.codec.http.QueryStringDecoder;
 import io.netty.handler.codec.http.multipart.HttpPostBodyUtil.SeekAheadOptimize;
 import io.netty.handler.codec.http.multipart.HttpPostRequestDecoder.EndOfDataDecoderException;
 import io.netty.handler.codec.http.multipart.HttpPostRequestDecoder.ErrorDataDecoderException;
@@ -28,8 +28,6 @@ import io.netty.handler.codec.http.multipart.HttpPostRequestDecoder.MultiPartSta
 import io.netty.handler.codec.http.multipart.HttpPostRequestDecoder.NotEnoughDataDecoderException;
 
 import java.io.IOException;
-import java.io.UnsupportedEncodingException;
-import java.net.URLDecoder;
 import java.nio.charset.Charset;
 import java.util.ArrayList;
 import java.util.List;
@@ -37,6 +35,7 @@ import java.util.Map;
 import java.util.TreeMap;
 
 import static io.netty.buffer.Unpooled.*;
+import static io.netty.util.internal.ObjectUtil.*;
 
 /**
  * This decoder will decode Body and can handle POST BODY.
@@ -146,18 +145,9 @@ public class HttpPostStandardRequestDecoder implements InterfaceHttpPostRequestD
      *             errors
      */
     public HttpPostStandardRequestDecoder(HttpDataFactory factory, HttpRequest request, Charset charset) {
-        if (factory == null) {
-            throw new NullPointerException("factory");
-        }
-        if (request == null) {
-            throw new NullPointerException("request");
-        }
-        if (charset == null) {
-            throw new NullPointerException("charset");
-        }
-        this.request = request;
-        this.charset = charset;
-        this.factory = factory;
+        this.request = checkNotNull(request, "request");
+        this.charset = checkNotNull(charset, "charset");
+        this.factory = checkNotNull(factory, "factory");
         if (request instanceof HttpContent) {
             // Offer automatically if the given request is als type of HttpContent
             // See #1089
@@ -193,10 +183,7 @@ public class HttpPostStandardRequestDecoder implements InterfaceHttpPostRequestD
      */
     @Override
     public void setDiscardThreshold(int discardThreshold) {
-        if (discardThreshold < 0) {
-          throw new IllegalArgumentException("discardThreshold must be >= 0");
-        }
-        this.discardThreshold = discardThreshold;
+        this.discardThreshold = checkPositiveOrZero(discardThreshold, "discardThreshold");
     }
 
     /**
@@ -351,6 +338,11 @@ public class HttpPostStandardRequestDecoder implements InterfaceHttpPostRequestD
         return null;
     }
 
+    @Override
+    public InterfaceHttpData currentPartialHttpData() {
+        return currentAttribute;
+    }
+
     /**
      * This getMethod will parse as much as possible data and fill the list and map
      *
@@ -474,6 +466,7 @@ public class HttpPostStandardRequestDecoder implements InterfaceHttpPostRequestD
                 }
                 firstpos = currentpos;
                 currentStatus = MultiPartStatus.EPILOGUE;
+                undecodedChunk.readerIndex(firstpos);
                 return;
             }
             if (contRead && currentAttribute != null) {
@@ -485,7 +478,8 @@ public class HttpPostStandardRequestDecoder implements InterfaceHttpPostRequestD
                 }
                 undecodedChunk.readerIndex(firstpos);
             } else {
-                // end of line so keep index
+                // end of line or end of block so keep index to last valid position
+                undecodedChunk.readerIndex(firstpos);
             }
         } catch (ErrorDataDecoderException e) {
             // error while decoding
@@ -507,13 +501,11 @@ public class HttpPostStandardRequestDecoder implements InterfaceHttpPostRequestD
      *             errors
      */
     private void parseBodyAttributes() {
-        SeekAheadOptimize sao;
-        try {
-            sao = new SeekAheadOptimize(undecodedChunk);
-        } catch (SeekAheadNoBackArrayException e1) {
+        if (!undecodedChunk.hasArray()) {
             parseBodyAttributesStandard();
             return;
         }
+        SeekAheadOptimize sao = new SeekAheadOptimize(undecodedChunk);
         int firstpos = undecodedChunk.readerIndex();
         int currentpos = firstpos;
         int equalpos;
@@ -604,6 +596,7 @@ public class HttpPostStandardRequestDecoder implements InterfaceHttpPostRequestD
                 }
                 firstpos = currentpos;
                 currentStatus = MultiPartStatus.EPILOGUE;
+                undecodedChunk.readerIndex(firstpos);
                 return;
             }
             if (contRead && currentAttribute != null) {
@@ -615,13 +608,18 @@ public class HttpPostStandardRequestDecoder implements InterfaceHttpPostRequestD
                 }
                 undecodedChunk.readerIndex(firstpos);
             } else {
-                // end of line so keep index
+                // end of line or end of block so keep index to last valid position
+                undecodedChunk.readerIndex(firstpos);
             }
         } catch (ErrorDataDecoderException e) {
             // error while decoding
             undecodedChunk.readerIndex(firstpos);
             throw e;
         } catch (IOException e) {
+            // error while decoding
+            undecodedChunk.readerIndex(firstpos);
+            throw new ErrorDataDecoderException(e);
+        } catch (IllegalArgumentException e) {
             // error while decoding
             undecodedChunk.readerIndex(firstpos);
             throw new ErrorDataDecoderException(e);
@@ -642,51 +640,10 @@ public class HttpPostStandardRequestDecoder implements InterfaceHttpPostRequestD
      * @return the decoded component
      */
     private static String decodeAttribute(String s, Charset charset) {
-        if (s == null) {
-            return "";
-        }
         try {
-            return URLDecoder.decode(s, charset.name());
-        } catch (UnsupportedEncodingException e) {
-            throw new ErrorDataDecoderException(charset.toString(), e);
+            return QueryStringDecoder.decodeComponent(s, charset);
         } catch (IllegalArgumentException e) {
             throw new ErrorDataDecoderException("Bad string: '" + s + '\'', e);
-        }
-    }
-
-    /**
-     * Skip control Characters
-     */
-    void skipControlCharacters() {
-        SeekAheadOptimize sao;
-        try {
-            sao = new SeekAheadOptimize(undecodedChunk);
-        } catch (SeekAheadNoBackArrayException e) {
-            try {
-                skipControlCharactersStandard();
-            } catch (IndexOutOfBoundsException e1) {
-                throw new NotEnoughDataDecoderException(e1);
-            }
-            return;
-        }
-
-        while (sao.pos < sao.limit) {
-            char c = (char) (sao.bytes[sao.pos++] & 0xFF);
-            if (!Character.isISOControl(c) && !Character.isWhitespace(c)) {
-                sao.setReadPosition(1);
-                return;
-            }
-        }
-        throw new NotEnoughDataDecoderException("Access out of bounds");
-    }
-
-    void skipControlCharactersStandard() {
-        for (;;) {
-            char c = (char) undecodedChunk.readUnsignedByte();
-            if (!Character.isISOControl(c) && !Character.isWhitespace(c)) {
-                undecodedChunk.readerIndex(undecodedChunk.readerIndex() - 1);
-                break;
-            }
         }
     }
 

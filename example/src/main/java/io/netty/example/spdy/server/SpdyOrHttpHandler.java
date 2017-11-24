@@ -15,42 +15,60 @@
  */
 package io.netty.example.spdy.server;
 
-import io.netty.channel.ChannelInboundHandler;
-import io.netty.handler.codec.spdy.SpdyOrHttpChooser;
-import org.eclipse.jetty.npn.NextProtoNego;
-
-import javax.net.ssl.SSLEngine;
-import java.util.logging.Logger;
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelPipeline;
+import io.netty.handler.codec.http.HttpObjectAggregator;
+import io.netty.handler.codec.http.HttpServerCodec;
+import io.netty.handler.codec.spdy.SpdyFrameCodec;
+import io.netty.handler.codec.spdy.SpdyHttpDecoder;
+import io.netty.handler.codec.spdy.SpdyHttpEncoder;
+import io.netty.handler.codec.spdy.SpdyHttpResponseStreamIdHandler;
+import io.netty.handler.codec.spdy.SpdySessionHandler;
+import io.netty.handler.codec.spdy.SpdyVersion;
+import io.netty.handler.ssl.ApplicationProtocolNames;
+import io.netty.handler.ssl.ApplicationProtocolNegotiationHandler;
 
 /**
  * Negotiates with the browser if SPDY or HTTP is going to be used. Once decided, the Netty pipeline is setup with
  * the correct handlers for the selected protocol.
  */
-public class SpdyOrHttpHandler extends SpdyOrHttpChooser {
-    private static final Logger logger = Logger.getLogger(
-            SpdyOrHttpHandler.class.getName());
+public class SpdyOrHttpHandler extends ApplicationProtocolNegotiationHandler {
+
     private static final int MAX_CONTENT_LENGTH = 1024 * 100;
 
-    public SpdyOrHttpHandler() {
-        this(MAX_CONTENT_LENGTH, MAX_CONTENT_LENGTH);
-    }
-
-    public SpdyOrHttpHandler(int maxSpdyContentLength, int maxHttpContentLength) {
-        super(maxSpdyContentLength, maxHttpContentLength);
+    protected SpdyOrHttpHandler() {
+        super(ApplicationProtocolNames.HTTP_1_1);
     }
 
     @Override
-    protected SelectedProtocol getProtocol(SSLEngine engine) {
-        SpdyServerProvider provider = (SpdyServerProvider) NextProtoNego.get(engine);
-        SelectedProtocol selectedProtocol = provider.getSelectedProtocol();
+    protected void configurePipeline(ChannelHandlerContext ctx, String protocol) throws Exception {
+        if (ApplicationProtocolNames.SPDY_3_1.equals(protocol)) {
+            configureSpdy(ctx, SpdyVersion.SPDY_3_1);
+            return;
+        }
 
-        logger.info("Selected Protocol is " + selectedProtocol);
-        return selectedProtocol;
+        if (ApplicationProtocolNames.HTTP_1_1.equals(protocol)) {
+            configureHttp1(ctx);
+            return;
+        }
+
+        throw new IllegalStateException("unknown protocol: " + protocol);
     }
 
-    @Override
-    protected ChannelInboundHandler createHttpRequestHandlerForHttp() {
-        return new SpdyServerHandler();
+    private static void configureSpdy(ChannelHandlerContext ctx, SpdyVersion version) throws Exception {
+        ChannelPipeline p = ctx.pipeline();
+        p.addLast(new SpdyFrameCodec(version));
+        p.addLast(new SpdySessionHandler(version, true));
+        p.addLast(new SpdyHttpEncoder(version));
+        p.addLast(new SpdyHttpDecoder(version, MAX_CONTENT_LENGTH));
+        p.addLast(new SpdyHttpResponseStreamIdHandler());
+        p.addLast(new SpdyServerHandler());
     }
 
+    private static void configureHttp1(ChannelHandlerContext ctx) throws Exception {
+        ChannelPipeline p = ctx.pipeline();
+        p.addLast(new HttpServerCodec());
+        p.addLast(new HttpObjectAggregator(MAX_CONTENT_LENGTH));
+        p.addLast(new SpdyServerHandler());
+    }
 }

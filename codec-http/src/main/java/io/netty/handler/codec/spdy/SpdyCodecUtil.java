@@ -16,7 +16,6 @@
 package io.netty.handler.codec.spdy;
 
 import io.netty.buffer.ByteBuf;
-import io.netty.util.CharsetUtil;
 
 final class SpdyCodecUtil {
 
@@ -286,11 +285,11 @@ final class SpdyCodecUtil {
     /**
      * Validate a SPDY header name.
      */
-    static void validateHeaderName(String name) {
+    static void validateHeaderName(CharSequence name) {
         if (name == null) {
             throw new NullPointerException("name");
         }
-        if (name.isEmpty()) {
+        if (name.length() == 0) {
             throw new IllegalArgumentException(
                     "name cannot be length zero");
         }
@@ -306,6 +305,9 @@ final class SpdyCodecUtil {
                 throw new IllegalArgumentException(
                         "name contains null character: " + name);
             }
+            if (c >= 'A' && c <= 'Z') {
+                throw new IllegalArgumentException("name must be all lower case.");
+            }
             if (c > 127) {
                 throw new IllegalArgumentException(
                         "name contains non-ascii character: " + name);
@@ -316,7 +318,7 @@ final class SpdyCodecUtil {
     /**
      * Validate a SPDY header value. Does not validate max length.
      */
-    static void validateHeaderValue(String value) {
+    static void validateHeaderValue(CharSequence value) {
         if (value == null) {
             throw new NullPointerException("value");
         }

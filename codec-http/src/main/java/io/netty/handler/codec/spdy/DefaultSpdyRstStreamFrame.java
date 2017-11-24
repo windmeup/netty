@@ -59,7 +59,7 @@ public class DefaultSpdyRstStreamFrame extends DefaultSpdyStreamFrame
     }
 
     @Override
-    public SpdyStreamStatus getStatus() {
+    public SpdyStreamStatus status() {
         return status;
     }
 
@@ -71,14 +71,14 @@ public class DefaultSpdyRstStreamFrame extends DefaultSpdyStreamFrame
 
     @Override
     public String toString() {
-        StringBuilder buf = new StringBuilder();
-        buf.append(StringUtil.simpleClassName(this));
-        buf.append(StringUtil.NEWLINE);
-        buf.append("--> Stream-ID = ");
-        buf.append(getStreamId());
-        buf.append(StringUtil.NEWLINE);
-        buf.append("--> Status: ");
-        buf.append(getStatus().toString());
-        return buf.toString();
+        return new StringBuilder()
+            .append(StringUtil.simpleClassName(this))
+            .append(StringUtil.NEWLINE)
+            .append("--> Stream-ID = ")
+            .append(streamId())
+            .append(StringUtil.NEWLINE)
+            .append("--> Status: ")
+            .append(status())
+            .toString();
     }
 }

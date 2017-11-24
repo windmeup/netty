@@ -16,8 +16,11 @@
 
 package io.netty.util;
 
-import java.util.HashMap;
-import java.util.Map;
+import io.netty.util.internal.ObjectUtil;
+import io.netty.util.internal.PlatformDependent;
+
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * A pool of {@link Constant}s.
@@ -26,9 +29,9 @@ import java.util.Map;
  */
 public abstract class ConstantPool<T extends Constant<T>> {
 
-    private final Map<String, T> constants = new HashMap<String, T>();
+    private final ConcurrentMap<String, T> constants = PlatformDependent.newConcurrentHashMap();
 
-    private int nextId = 1;
+    private final AtomicInteger nextId = new AtomicInteger(1);
 
     /**
      * Shortcut of {@link #valueOf(String) valueOf(firstNameComponent.getName() + "#" + secondNameComponent)}.
@@ -53,25 +56,77 @@ public abstract class ConstantPool<T extends Constant<T>> {
      * @param name the name of the {@link Constant}
      */
     public T valueOf(String name) {
-        if (name == null) {
-            throw new NullPointerException("name");
+        checkNotNullAndNotEmpty(name);
+        return getOrCreate(name);
+    }
+
+    /**
+     * Get existing constant by name or creates new one if not exists. Threadsafe
+     *
+     * @param name the name of the {@link Constant}
+     */
+    private T getOrCreate(String name) {
+        T constant = constants.get(name);
+        if (constant == null) {
+            final T tempConstant = newConstant(nextId(), name);
+            constant = constants.putIfAbsent(name, tempConstant);
+            if (constant == null) {
+                return tempConstant;
+            }
         }
+
+        return constant;
+    }
+
+    /**
+     * Returns {@code true} if a {@link AttributeKey} exists for the given {@code name}.
+     */
+    public boolean exists(String name) {
+        checkNotNullAndNotEmpty(name);
+        return constants.containsKey(name);
+    }
+
+    /**
+     * Creates a new {@link Constant} for the given {@code name} or fail with an
+     * {@link IllegalArgumentException} if a {@link Constant} for the given {@code name} exists.
+     */
+    public T newInstance(String name) {
+        checkNotNullAndNotEmpty(name);
+        return createOrThrow(name);
+    }
+
+    /**
+     * Creates constant by name or throws exception. Threadsafe
+     *
+     * @param name the name of the {@link Constant}
+     */
+    private T createOrThrow(String name) {
+        T constant = constants.get(name);
+        if (constant == null) {
+            final T tempConstant = newConstant(nextId(), name);
+            constant = constants.putIfAbsent(name, tempConstant);
+            if (constant == null) {
+                return tempConstant;
+            }
+        }
+
+        throw new IllegalArgumentException(String.format("'%s' is already in use", name));
+    }
+
+    private static String checkNotNullAndNotEmpty(String name) {
+        ObjectUtil.checkNotNull(name, "name");
 
         if (name.isEmpty()) {
             throw new IllegalArgumentException("empty name");
         }
 
-        synchronized (constants) {
-            T c = constants.get(name);
-            if (c == null) {
-                c = newConstant(nextId, name);
-                constants.put(name, c);
-                nextId ++;
-            }
-
-            return c;
-        }
+        return name;
     }
 
     protected abstract T newConstant(int id, String name);
+
+    @Deprecated
+    public final int nextId() {
+        return nextId.getAndIncrement();
+    }
 }

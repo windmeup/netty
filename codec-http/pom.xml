@@ -20,7 +20,7 @@
   <parent>
     <groupId>io.netty</groupId>
     <artifactId>netty-parent</artifactId>
-    <version>4.1.0.Alpha1-SNAPSHOT</version>
+    <version>4.1.18.Final-SNAPSHOT</version>
   </parent>
 
   <artifactId>netty-codec-http</artifactId>
@@ -38,11 +38,16 @@
       <groupId>${project.groupId}</groupId>
       <artifactId>netty-handler</artifactId>
       <version>${project.version}</version>
+      <optional>true</optional>
     </dependency>
     <dependency>
       <groupId>com.jcraft</groupId>
       <artifactId>jzlib</artifactId>
       <optional>true</optional>
+    </dependency>
+    <dependency>
+      <groupId>org.mockito</groupId>
+      <artifactId>mockito-core</artifactId>
     </dependency>
   </dependencies>
 </project>

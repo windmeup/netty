@@ -31,7 +31,7 @@ public class JZlibDecoder extends ZlibDecoder {
     /**
      * Creates a new instance with the default wrapper ({@link ZlibWrapper#ZLIB}).
      *
-     * @throws CompressionException if failed to initialize zlib
+     * @throws DecompressionException if failed to initialize zlib
      */
     public JZlibDecoder() {
         this(ZlibWrapper.ZLIB);
@@ -40,7 +40,7 @@ public class JZlibDecoder extends ZlibDecoder {
     /**
      * Creates a new instance with the specified wrapper.
      *
-     * @throws CompressionException if failed to initialize zlib
+     * @throws DecompressionException if failed to initialize zlib
      */
     public JZlibDecoder(ZlibWrapper wrapper) {
         if (wrapper == null) {
@@ -58,7 +58,7 @@ public class JZlibDecoder extends ZlibDecoder {
      * is always {@link ZlibWrapper#ZLIB} because it is the only format that
      * supports the preset dictionary.
      *
-     * @throws CompressionException if failed to initialize zlib
+     * @throws DecompressionException if failed to initialize zlib
      */
     public JZlibDecoder(byte[] dictionary) {
         if (dictionary == null) {
@@ -90,13 +90,13 @@ public class JZlibDecoder extends ZlibDecoder {
             return;
         }
 
-        if (!in.isReadable()) {
+        final int inputLength = in.readableBytes();
+        if (inputLength == 0) {
             return;
         }
 
         try {
             // Configure input.
-            int inputLength = in.readableBytes();
             z.avail_in = inputLength;
             if (in.hasArray()) {
                 z.next_in = in.array();
@@ -107,16 +107,15 @@ public class JZlibDecoder extends ZlibDecoder {
                 z.next_in = array;
                 z.next_in_index = 0;
             }
-            int oldNextInIndex = z.next_in_index;
+            final int oldNextInIndex = z.next_in_index;
 
             // Configure output.
-            int maxOutputLength = inputLength << 1;
-            ByteBuf decompressed = ctx.alloc().heapBuffer(maxOutputLength);
+            ByteBuf decompressed = ctx.alloc().heapBuffer(inputLength << 1);
 
             try {
                 loop: for (;;) {
-                    z.avail_out = maxOutputLength;
-                    decompressed.ensureWritable(maxOutputLength);
+                    decompressed.ensureWritable(z.avail_in << 1);
+                    z.avail_out = decompressed.writableBytes();
                     z.next_out = decompressed.array();
                     z.next_out_index = decompressed.arrayOffset() + decompressed.writerIndex();
                     int oldNextOutIndex = z.next_out_index;

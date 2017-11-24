@@ -17,33 +17,30 @@
 package io.netty.channel;
 
 import io.netty.buffer.ByteBufUtil;
+import io.netty.util.internal.EmptyArrays;
+import io.netty.util.internal.MacAddressUtil;
+import io.netty.util.internal.PlatformDependent;
 import io.netty.util.internal.SystemPropertyUtil;
-import io.netty.util.internal.ThreadLocalRandom;
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
 
 import java.lang.reflect.Method;
-import java.net.NetworkInterface;
-import java.net.SocketException;
 import java.util.Arrays;
-import java.util.Enumeration;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.regex.Pattern;
+
+import static io.netty.util.internal.MacAddressUtil.defaultMachineId;
+import static io.netty.util.internal.MacAddressUtil.parseMAC;
 
 /**
  * The default {@link ChannelId} implementation.
  */
-final class DefaultChannelId implements ChannelId {
+public final class DefaultChannelId implements ChannelId {
 
     private static final long serialVersionUID = 3884076183504074063L;
 
     private static final InternalLogger logger = InternalLoggerFactory.getInstance(DefaultChannelId.class);
-
-    private static final Pattern MACHINE_ID_PATTERN = Pattern.compile("^(?:[0-9a-fA-F][:-]?){6,8}$");
-    private static final int MACHINE_ID_LEN = 8;
     private static final byte[] MACHINE_ID;
-    private static final int PROCESS_ID_LEN = 2;
-    private static final int MAX_PROCESS_ID = 65535;
+    private static final int PROCESS_ID_LEN = 4;
     private static final int PROCESS_ID;
     private static final int SEQUENCE_LEN = 4;
     private static final int TIMESTAMP_LEN = 8;
@@ -51,33 +48,14 @@ final class DefaultChannelId implements ChannelId {
 
     private static final AtomicInteger nextSequence = new AtomicInteger();
 
-    static ChannelId newInstance() {
-        DefaultChannelId id = new DefaultChannelId();
-        id.init();
-        return id;
+    /**
+     * Returns a new {@link DefaultChannelId} instance.
+     */
+    public static DefaultChannelId newInstance() {
+        return new DefaultChannelId();
     }
 
     static {
-        byte[] machineId = null;
-        String customMachineId = SystemPropertyUtil.get("io.netty.machineId");
-        if (customMachineId != null) {
-            if (MACHINE_ID_PATTERN.matcher(customMachineId).matches()) {
-                machineId = parseMachineId(customMachineId);
-                logger.debug("-Dio.netty.machineId: {} (user-set)", customMachineId);
-            } else {
-                logger.warn("-Dio.netty.machineId: {} (malformed)", customMachineId);
-            }
-        }
-
-        if (machineId == null) {
-            machineId = defaultMachineId();
-            if (logger.isDebugEnabled()) {
-                logger.debug("-Dio.netty.machineId: {} (auto-detected)", formatAddress(machineId));
-            }
-        }
-
-        MACHINE_ID = machineId;
-
         int processId = -1;
         String customProcessId = SystemPropertyUtil.get("io.netty.processId");
         if (customProcessId != null) {
@@ -87,7 +65,7 @@ final class DefaultChannelId implements ChannelId {
                 // Malformed input.
             }
 
-            if (processId < 0 || processId > MAX_PROCESS_ID) {
+            if (processId < 0) {
                 processId = -1;
                 logger.warn("-Dio.netty.processId: {} (malformed)", customProcessId);
             } else if (logger.isDebugEnabled()) {
@@ -103,151 +81,52 @@ final class DefaultChannelId implements ChannelId {
         }
 
         PROCESS_ID = processId;
-    }
 
-    @SuppressWarnings("DynamicRegexReplaceableByCompiledPattern")
-    private static byte[] parseMachineId(String value) {
-        // Strip separators.
-        value = value.replaceAll("[:-]", "");
-
-        byte[] machineId = new byte[MACHINE_ID_LEN];
-        for (int i = 0; i < value.length(); i += 2) {
-            machineId[i] = (byte) Integer.parseInt(value.substring(i, i + 2), 16);
-        }
-
-        return machineId;
-    }
-
-    private static byte[] defaultMachineId() {
-        // Find the best MAC address available.
-        final byte[] NOT_FOUND = { -1 };
-        byte[] bestMacAddr = NOT_FOUND;
-
-        Enumeration<NetworkInterface> ifaces = null;
-        try {
-            ifaces = NetworkInterface.getNetworkInterfaces();
-        } catch (SocketException e) {
-            logger.warn("Failed to find the loopback interface", e);
-        }
-
-        if (ifaces != null) {
-            while (ifaces.hasMoreElements()) {
-                NetworkInterface iface = ifaces.nextElement();
-                try {
-                    if (iface.isLoopback() || iface.isPointToPoint() || iface.isVirtual()) {
-                        continue;
-                    }
-                } catch (SocketException e) {
-                    logger.debug("Failed to determine the type of a network interface: {}", iface, e);
-                    continue;
-                }
-
-                byte[] macAddr;
-                try {
-                    macAddr = iface.getHardwareAddress();
-                } catch (SocketException e) {
-                    logger.debug("Failed to get the hardware address of a network interface: {}", iface, e);
-                    continue;
-                }
-
-                if (isBetterAddress(bestMacAddr, macAddr)) {
-                    bestMacAddr = macAddr;
-                }
+        byte[] machineId = null;
+        String customMachineId = SystemPropertyUtil.get("io.netty.machineId");
+        if (customMachineId != null) {
+            try {
+                machineId = parseMAC(customMachineId);
+            } catch (Exception e) {
+                logger.warn("-Dio.netty.machineId: {} (malformed)", customMachineId, e);
+            }
+            if (machineId != null) {
+                logger.debug("-Dio.netty.machineId: {} (user-set)", customMachineId);
             }
         }
 
-        if (bestMacAddr == NOT_FOUND) {
-            bestMacAddr = new byte[MACHINE_ID_LEN];
-            ThreadLocalRandom.current().nextBytes(bestMacAddr);
-            logger.warn(
-                    "Failed to find a usable hardware address from the network interfaces; using random bytes: {}",
-                    formatAddress(bestMacAddr));
-        }
-
-        if (bestMacAddr.length != MACHINE_ID_LEN) {
-            bestMacAddr = Arrays.copyOf(bestMacAddr, MACHINE_ID_LEN);
-        }
-
-        return bestMacAddr;
-    }
-
-    private static boolean isBetterAddress(byte[] current, byte[] candidate) {
-        if (candidate == null) {
-            return false;
-        }
-
-        // Must be EUI-48 or longer.
-        if (candidate.length < 6) {
-            return false;
-        }
-
-        // Must not be filled with only 0 or 1.
-        boolean onlyZero = true;
-        boolean onlyOne = true;
-        for (byte b: candidate) {
-            if (b != 0) {
-                onlyZero = false;
-            }
-
-            if (b != -1) {
-                onlyOne = false;
+        if (machineId == null) {
+            machineId = defaultMachineId();
+            if (logger.isDebugEnabled()) {
+                logger.debug("-Dio.netty.machineId: {} (auto-detected)", MacAddressUtil.formatAddress(machineId));
             }
         }
 
-        if (onlyZero || onlyOne) {
-            return false;
-        }
-
-        // Must not be a multicast address
-        if ((candidate[0] & 1) != 0) {
-            return false;
-        }
-
-        // Prefer longer globally unique addresses.
-        if ((current[0] & 2) == 0) {
-            if ((candidate[0] & 2) == 0) {
-                return candidate.length > current.length;
-            } else {
-                return false;
-            }
-        } else {
-            if ((candidate[0] & 2) == 0) {
-                return true;
-            } else {
-                return candidate.length > current.length;
-            }
-        }
-    }
-
-    private static String formatAddress(byte[] addr) {
-        StringBuilder buf = new StringBuilder(24);
-        for (byte b: addr) {
-            buf.append(String.format("%02x:", b & 0xff));
-        }
-        return buf.substring(0, buf.length() - 1);
+        MACHINE_ID = machineId;
     }
 
     private static int defaultProcessId() {
-        final ClassLoader loader = ClassLoader.getSystemClassLoader();
+        ClassLoader loader = null;
         String value;
         try {
+            loader = PlatformDependent.getClassLoader(DefaultChannelId.class);
             // Invoke java.lang.management.ManagementFactory.getRuntimeMXBean().getName()
             Class<?> mgmtFactoryType = Class.forName("java.lang.management.ManagementFactory", true, loader);
             Class<?> runtimeMxBeanType = Class.forName("java.lang.management.RuntimeMXBean", true, loader);
 
-            Method getRuntimeMXBean = mgmtFactoryType.getMethod("getRuntimeMXBean", null);
-            Object bean = getRuntimeMXBean.invoke(null, null);
-            Method getName = runtimeMxBeanType.getDeclaredMethod("getName");
-            value = (String) getName.invoke(bean, null);
-        } catch (Exception e) {
-            logger.debug("Could not invoke ManagementFactory.getRuntimeMXBean().getName(); Android?", e);
+            Method getRuntimeMXBean = mgmtFactoryType.getMethod("getRuntimeMXBean", EmptyArrays.EMPTY_CLASSES);
+            Object bean = getRuntimeMXBean.invoke(null, EmptyArrays.EMPTY_OBJECTS);
+            Method getName = runtimeMxBeanType.getMethod("getName", EmptyArrays.EMPTY_CLASSES);
+            value = (String) getName.invoke(bean, EmptyArrays.EMPTY_OBJECTS);
+        } catch (Throwable t) {
+            logger.debug("Could not invoke ManagementFactory.getRuntimeMXBean().getName(); Android?", t);
             try {
                 // Invoke android.os.Process.myPid()
                 Class<?> processType = Class.forName("android.os.Process", true, loader);
-                Method myPid = processType.getMethod("myPid", null);
-                value = myPid.invoke(null, null).toString();
-            } catch (Exception e2) {
-                logger.debug("Could not invoke Process.myPid(); not Android?", e2);
+                Method myPid = processType.getMethod("myPid", EmptyArrays.EMPTY_CLASSES);
+                value = myPid.invoke(null, EmptyArrays.EMPTY_OBJECTS).toString();
+            } catch (Throwable t2) {
+                logger.debug("Could not invoke Process.myPid(); not Android?", t2);
                 value = "";
             }
         }
@@ -265,29 +144,30 @@ final class DefaultChannelId implements ChannelId {
             pid = -1;
         }
 
-        if (pid < 0 || pid > MAX_PROCESS_ID) {
-            pid = ThreadLocalRandom.current().nextInt(MAX_PROCESS_ID + 1);
+        if (pid < 0) {
+            pid = PlatformDependent.threadLocalRandom().nextInt();
             logger.warn("Failed to find the current process ID from '{}'; using a random value: {}",  value, pid);
         }
 
         return pid;
     }
 
-    private final byte[] data = new byte[MACHINE_ID_LEN + PROCESS_ID_LEN + SEQUENCE_LEN + TIMESTAMP_LEN + RANDOM_LEN];
-    private int hashCode;
+    private final byte[] data;
+    private final int hashCode;
 
     private transient String shortValue;
     private transient String longValue;
 
-    private void init() {
+    private DefaultChannelId() {
+        data = new byte[MACHINE_ID.length + PROCESS_ID_LEN + SEQUENCE_LEN + TIMESTAMP_LEN + RANDOM_LEN];
         int i = 0;
 
         // machineId
-        System.arraycopy(MACHINE_ID, 0, data, i, MACHINE_ID_LEN);
-        i += MACHINE_ID_LEN;
+        System.arraycopy(MACHINE_ID, 0, data, i, MACHINE_ID.length);
+        i += MACHINE_ID.length;
 
         // processId
-        i = writeShort(i, PROCESS_ID);
+        i = writeInt(i, PROCESS_ID);
 
         // sequence
         i = writeInt(i, nextSequence.getAndIncrement());
@@ -296,17 +176,11 @@ final class DefaultChannelId implements ChannelId {
         i = writeLong(i, Long.reverse(System.nanoTime()) ^ System.currentTimeMillis());
 
         // random
-        int random = ThreadLocalRandom.current().nextInt();
-        hashCode = random;
+        int random = PlatformDependent.threadLocalRandom().nextInt();
         i = writeInt(i, random);
-
         assert i == data.length;
-    }
 
-    private int writeShort(int i, int value) {
-        data[i ++] = (byte) (value >>> 8);
-        data[i ++] = (byte) value;
-        return i;
+        hashCode = Arrays.hashCode(data);
     }
 
     private int writeInt(int i, int value) {
@@ -333,8 +207,7 @@ final class DefaultChannelId implements ChannelId {
     public String asShortText() {
         String shortValue = this.shortValue;
         if (shortValue == null) {
-            this.shortValue = shortValue = ByteBufUtil.hexDump(
-                    data, MACHINE_ID_LEN + PROCESS_ID_LEN + SEQUENCE_LEN + TIMESTAMP_LEN, RANDOM_LEN);
+            this.shortValue = shortValue = ByteBufUtil.hexDump(data, data.length - RANDOM_LEN, RANDOM_LEN);
         }
         return shortValue;
     }
@@ -349,9 +222,9 @@ final class DefaultChannelId implements ChannelId {
     }
 
     private String newLongValue() {
-        StringBuilder buf = new StringBuilder(data.length + 4);
+        StringBuilder buf = new StringBuilder(2 * data.length + 5);
         int i = 0;
-        i = appendHexDumpField(buf, i, MACHINE_ID_LEN);
+        i = appendHexDumpField(buf, i, MACHINE_ID.length);
         i = appendHexDumpField(buf, i, PROCESS_ID_LEN);
         i = appendHexDumpField(buf, i, SEQUENCE_LEN);
         i = appendHexDumpField(buf, i, TIMESTAMP_LEN);
@@ -373,21 +246,42 @@ final class DefaultChannelId implements ChannelId {
     }
 
     @Override
-    public int compareTo(ChannelId o) {
-        return 0;
+    public int compareTo(final ChannelId o) {
+        if (this == o) {
+            // short circuit
+            return 0;
+        }
+        if (o instanceof DefaultChannelId) {
+            // lexicographic comparison
+            final byte[] otherData = ((DefaultChannelId) o).data;
+            int len1 = data.length;
+            int len2 = otherData.length;
+            int len = Math.min(len1, len2);
+
+            for (int k = 0; k < len; k++) {
+                byte x = data[k];
+                byte y = otherData[k];
+                if (x != y) {
+                    // treat these as unsigned bytes for comparison
+                    return (x & 0xff) - (y & 0xff);
+                }
+            }
+            return len1 - len2;
+        }
+
+        return asLongText().compareTo(o.asLongText());
     }
 
     @Override
     public boolean equals(Object obj) {
-        if (obj == this) {
+        if (this == obj) {
             return true;
         }
-
         if (!(obj instanceof DefaultChannelId)) {
             return false;
         }
-
-        return Arrays.equals(data, ((DefaultChannelId) obj).data);
+        DefaultChannelId other = (DefaultChannelId) obj;
+        return hashCode == other.hashCode && Arrays.equals(data, other.data);
     }
 
     @Override

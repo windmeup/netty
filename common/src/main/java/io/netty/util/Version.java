@@ -16,6 +16,8 @@
 
 package io.netty.util;
 
+import io.netty.util.internal.PlatformDependent;
+
 import java.io.InputStream;
 import java.net.URL;
 import java.text.ParseException;
@@ -61,7 +63,7 @@ public final class Version {
      */
     public static Map<String, Version> identify(ClassLoader classLoader) {
         if (classLoader == null) {
-            classLoader = Thread.currentThread().getContextClassLoader();
+            classLoader = PlatformDependent.getContextClassLoader();
         }
 
         // Collect all properties.
@@ -130,7 +132,7 @@ public final class Version {
     private static long parseIso8601(String value) {
         try {
             return new SimpleDateFormat("yyyy-MM-dd HH:mm:ss Z").parse(value).getTime();
-        } catch (ParseException e) {
+        } catch (ParseException ignored) {
             return 0;
         }
     }

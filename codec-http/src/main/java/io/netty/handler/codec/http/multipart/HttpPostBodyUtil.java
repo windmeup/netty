@@ -16,9 +16,6 @@
 package io.netty.handler.codec.http.multipart;
 
 import io.netty.buffer.ByteBuf;
-import io.netty.util.CharsetUtil;
-
-import java.nio.charset.Charset;
 
 /**
  * Shared Static object between HttpMessageDecoder, HttpPostRequestDecoder and HttpPostRequestEncoder
@@ -26,44 +23,6 @@ import java.nio.charset.Charset;
 final class HttpPostBodyUtil {
 
     public static final int chunkSize = 8096;
-    /**
-     * HTTP content disposition header name.
-     */
-    public static final String CONTENT_DISPOSITION = "Content-Disposition";
-
-    public static final String NAME = "name";
-
-    public static final String FILENAME = "filename";
-
-    /**
-     * Content-disposition value for form data.
-     */
-    public static final String FORM_DATA = "form-data";
-
-    /**
-     * Content-disposition value for file attachment.
-     */
-    public static final String ATTACHMENT = "attachment";
-
-    /**
-     * Content-disposition value for file attachment.
-     */
-    public static final String FILE = "file";
-
-    /**
-     * HTTP content type body attribute for multiple uploads.
-     */
-    public static final String MULTIPART_MIXED = "multipart/mixed";
-
-    /**
-     * Charset for 8BIT
-     */
-    public static final Charset ISO_8859_1 = CharsetUtil.ISO_8859_1;
-
-    /**
-     * Charset for 7BIT
-     */
-    public static final Charset US_ASCII = CharsetUtil.US_ASCII;
 
     /**
      * Default Content-Type in binary form
@@ -103,10 +62,6 @@ final class HttpPostBodyUtil {
             this.value = value;
         }
 
-        TransferEncodingMechanism() {
-            value = name();
-        }
-
         public String value() {
             return value;
         }
@@ -121,13 +76,6 @@ final class HttpPostBodyUtil {
     }
 
     /**
-    * Exception when NO Backend Array is found
-    */
-    static class SeekAheadNoBackArrayException extends Exception {
-        private static final long serialVersionUID = -630418804938699495L;
-    }
-
-    /**
     * This class intends to decrease the CPU in seeking ahead some bytes in
     * HttpPostRequestDecoder
     */
@@ -139,9 +87,12 @@ final class HttpPostBodyUtil {
         int limit;
         ByteBuf buffer;
 
-        SeekAheadOptimize(ByteBuf buffer) throws SeekAheadNoBackArrayException {
+        /**
+         * @param buffer buffer with a backing byte array
+         */
+        SeekAheadOptimize(ByteBuf buffer) {
             if (!buffer.hasArray()) {
-                throw new SeekAheadNoBackArrayException();
+                throw new IllegalArgumentException("buffer hasn't backing byte array");
             }
             this.buffer = buffer;
             bytes = buffer.array();
@@ -169,14 +120,6 @@ final class HttpPostBodyUtil {
         int getReadPosition(int index) {
             return index - origPos + readerIndex;
         }
-
-        void clear() {
-            buffer = null;
-            bytes = null;
-            limit = 0;
-            pos = 0;
-            readerIndex = 0;
-        }
     }
 
     /**
@@ -187,20 +130,6 @@ final class HttpPostBodyUtil {
         int result;
         for (result = offset; result < sb.length(); result ++) {
             if (!Character.isWhitespace(sb.charAt(result))) {
-                break;
-            }
-        }
-        return result;
-    }
-
-    /**
-     * Find the first whitespace
-     * @return the rank of the first whitespace
-     */
-    static int findWhitespace(String sb, int offset) {
-        int result;
-        for (result = offset; result < sb.length(); result ++) {
-            if (Character.isWhitespace(sb.charAt(result))) {
                 break;
             }
         }

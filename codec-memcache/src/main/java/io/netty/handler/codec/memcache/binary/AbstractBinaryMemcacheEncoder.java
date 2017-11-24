@@ -19,27 +19,28 @@ import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.handler.codec.MessageToByteEncoder;
 import io.netty.handler.codec.memcache.AbstractMemcacheObjectEncoder;
-import io.netty.util.CharsetUtil;
+import io.netty.util.internal.UnstableApi;
 
 /**
- * A {@link MessageToByteEncoder} that encodes binary memache messages into bytes.
+ * A {@link MessageToByteEncoder} that encodes binary memcache messages into bytes.
  */
-public abstract class AbstractBinaryMemcacheEncoder
-        <M extends BinaryMemcacheMessage<H>, H extends BinaryMemcacheMessageHeader>
+@UnstableApi
+public abstract class AbstractBinaryMemcacheEncoder<M extends BinaryMemcacheMessage>
     extends AbstractMemcacheObjectEncoder<M> {
 
     /**
      * Every binary memcache message has at least a 24 bytes header.
      */
-    private static final int DEFAULT_BUFFER_SIZE = 24;
+    private static final int MINIMUM_HEADER_SIZE = 24;
 
     @Override
     protected ByteBuf encodeMessage(ChannelHandlerContext ctx, M msg) {
-        ByteBuf buf = ctx.alloc().buffer(DEFAULT_BUFFER_SIZE);
+        ByteBuf buf = ctx.alloc().buffer(MINIMUM_HEADER_SIZE + msg.extrasLength()
+            + msg.keyLength());
 
-        encodeHeader(buf, msg.getHeader());
-        encodeExtras(buf, msg.getExtras());
-        encodeKey(buf, msg.getKey());
+        encodeHeader(buf, msg);
+        encodeExtras(buf, msg.extras());
+        encodeKey(buf, msg.key());
 
         return buf;
     }
@@ -64,12 +65,12 @@ public abstract class AbstractBinaryMemcacheEncoder
      * @param buf the {@link ByteBuf} to write into.
      * @param key the key to encode.
      */
-    private static void encodeKey(ByteBuf buf, String key) {
-        if (key == null || key.isEmpty()) {
+    private static void encodeKey(ByteBuf buf, ByteBuf key) {
+        if (key == null || !key.isReadable()) {
             return;
         }
 
-        buf.writeBytes(key.getBytes(CharsetUtil.UTF_8));
+        buf.writeBytes(key);
     }
 
     /**
@@ -78,9 +79,9 @@ public abstract class AbstractBinaryMemcacheEncoder
      * This methods needs to be implemented by a sub class because the header is different
      * for both requests and responses.
      *
-     * @param buf    the {@link ByteBuf} to write into.
-     * @param header the header to encode.
+     * @param buf the {@link ByteBuf} to write into.
+     * @param msg the message to encode.
      */
-    protected abstract void encodeHeader(ByteBuf buf, H header);
+    protected abstract void encodeHeader(ByteBuf buf, M msg);
 
 }

@@ -46,13 +46,12 @@ public class BinaryMemcacheEncoderTest {
 
     @After
     public void teardown() throws Exception {
-        channel.finish();
+        channel.finishAndReleaseAll();
     }
 
     @Test
     public void shouldEncodeDefaultHeader() {
-        BinaryMemcacheRequestHeader header = new DefaultBinaryMemcacheRequestHeader();
-        BinaryMemcacheRequest request = new DefaultBinaryMemcacheRequest(header);
+        BinaryMemcacheRequest request = new DefaultBinaryMemcacheRequest();
 
         boolean result = channel.writeOutbound(request);
         assertThat(result, is(true));
@@ -66,10 +65,9 @@ public class BinaryMemcacheEncoderTest {
 
     @Test
     public void shouldEncodeCustomHeader() {
-        BinaryMemcacheRequestHeader header = new DefaultBinaryMemcacheRequestHeader();
-        header.setMagic((byte) 0xAA);
-        header.setOpcode(BinaryMemcacheOpcodes.GET);
-        BinaryMemcacheRequest request = new DefaultBinaryMemcacheRequest(header);
+        BinaryMemcacheRequest request = new DefaultBinaryMemcacheRequest();
+        request.setMagic((byte) 0xAA);
+        request.setOpcode(BinaryMemcacheOpcodes.GET);
 
         boolean result = channel.writeOutbound(request);
         assertThat(result, is(true));
@@ -86,35 +84,33 @@ public class BinaryMemcacheEncoderTest {
         String extrasContent = "netty<3memcache";
         ByteBuf extras = Unpooled.copiedBuffer(extrasContent, CharsetUtil.UTF_8);
         int extrasLength = extras.readableBytes();
-        BinaryMemcacheRequestHeader header = new DefaultBinaryMemcacheRequestHeader();
-        header.setExtrasLength((byte) extrasLength);
-        BinaryMemcacheRequest request = new DefaultBinaryMemcacheRequest(header, extras);
+
+        BinaryMemcacheRequest request = new DefaultBinaryMemcacheRequest(Unpooled.EMPTY_BUFFER, extras);
 
         boolean result = channel.writeOutbound(request);
         assertThat(result, is(true));
 
         ByteBuf written = channel.readOutbound();
         assertThat(written.readableBytes(), is(DEFAULT_HEADER_SIZE + extrasLength));
-        written.readBytes(DEFAULT_HEADER_SIZE);
-        assertThat(written.readBytes(extrasLength).toString(CharsetUtil.UTF_8), equalTo(extrasContent));
+        written.skipBytes(DEFAULT_HEADER_SIZE);
+        assertThat(written.readSlice(extrasLength).toString(CharsetUtil.UTF_8), equalTo(extrasContent));
         written.release();
     }
 
     @Test
     public void shouldEncodeKey() {
-        String key = "netty";
-        int keyLength = key.length();
-        BinaryMemcacheRequestHeader header = new DefaultBinaryMemcacheRequestHeader();
-        header.setKeyLength((byte) keyLength);
-        BinaryMemcacheRequest request = new DefaultBinaryMemcacheRequest(header, key);
+        ByteBuf key = Unpooled.copiedBuffer("netty", CharsetUtil.UTF_8);
+        int keyLength = key.readableBytes();
+
+        BinaryMemcacheRequest request = new DefaultBinaryMemcacheRequest(key);
 
         boolean result = channel.writeOutbound(request);
         assertThat(result, is(true));
 
         ByteBuf written = channel.readOutbound();
         assertThat(written.readableBytes(), is(DEFAULT_HEADER_SIZE + keyLength));
-        written.readBytes(DEFAULT_HEADER_SIZE);
-        assertThat(written.readBytes(keyLength).toString(CharsetUtil.UTF_8), equalTo(key));
+        written.skipBytes(DEFAULT_HEADER_SIZE);
+        assertThat(written.readSlice(keyLength).toString(CharsetUtil.UTF_8), equalTo("netty"));
         written.release();
     }
 
@@ -126,9 +122,8 @@ public class BinaryMemcacheEncoderTest {
             new DefaultLastMemcacheContent(Unpooled.copiedBuffer(" Rocks!", CharsetUtil.UTF_8));
         int totalBodyLength = content1.content().readableBytes() + content2.content().readableBytes();
 
-        BinaryMemcacheRequestHeader header = new DefaultBinaryMemcacheRequestHeader();
-        header.setTotalBodyLength(totalBodyLength);
-        BinaryMemcacheRequest request = new DefaultBinaryMemcacheRequest(header);
+        BinaryMemcacheRequest request = new DefaultBinaryMemcacheRequest();
+        request.setTotalBodyLength(totalBodyLength);
 
         boolean result = channel.writeOutbound(request);
         assertThat(result, is(true));
@@ -139,10 +134,12 @@ public class BinaryMemcacheEncoderTest {
 
         ByteBuf written = channel.readOutbound();
         assertThat(written.readableBytes(), is(DEFAULT_HEADER_SIZE));
+        written.release();
+
         written = channel.readOutbound();
         assertThat(written.readableBytes(), is(content1.content().readableBytes()));
         assertThat(
-                written.readBytes(content1.content().readableBytes()).toString(CharsetUtil.UTF_8),
+                written.readSlice(content1.content().readableBytes()).toString(CharsetUtil.UTF_8),
                 is("Netty")
         );
         written.release();
@@ -150,7 +147,7 @@ public class BinaryMemcacheEncoderTest {
         written = channel.readOutbound();
         assertThat(written.readableBytes(), is(content2.content().readableBytes()));
         assertThat(
-                written.readBytes(content2.content().readableBytes()).toString(CharsetUtil.UTF_8),
+                written.readSlice(content2.content().readableBytes()).toString(CharsetUtil.UTF_8),
                 is(" Rocks!")
         );
         written.release();
@@ -159,6 +156,6 @@ public class BinaryMemcacheEncoderTest {
     @Test(expected = EncoderException.class)
     public void shouldFailWithoutLastContent() {
         channel.writeOutbound(new DefaultMemcacheContent(Unpooled.EMPTY_BUFFER));
-        channel.writeOutbound(new DefaultBinaryMemcacheRequest(new DefaultBinaryMemcacheRequestHeader()));
+        channel.writeOutbound(new DefaultBinaryMemcacheRequest());
     }
 }

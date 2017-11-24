@@ -20,15 +20,26 @@ import io.netty.buffer.CompositeByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.embedded.EmbeddedChannel;
+import io.netty.handler.codec.DecoderResult;
+import io.netty.handler.codec.DecoderResultProvider;
 import io.netty.handler.codec.TooLongFrameException;
 import io.netty.util.CharsetUtil;
-import org.easymock.EasyMock;
 import org.junit.Test;
+import org.mockito.Mockito;
 
+import java.nio.channels.ClosedChannelException;
 import java.util.List;
 
-import static io.netty.util.ReferenceCountUtil.*;
-import static org.junit.Assert.*;
+import static io.netty.handler.codec.http.HttpHeadersTestUtils.of;
+import static org.hamcrest.CoreMatchers.instanceOf;
+import static org.hamcrest.CoreMatchers.is;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertThat;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 public class HttpObjectAggregatorTest {
 
@@ -37,9 +48,8 @@ public class HttpObjectAggregatorTest {
         HttpObjectAggregator aggr = new HttpObjectAggregator(1024 * 1024);
         EmbeddedChannel embedder = new EmbeddedChannel(aggr);
 
-        HttpRequest message = new DefaultHttpRequest(HttpVersion.HTTP_1_1,
-                HttpMethod.GET, "http://localhost");
-        HttpHeaders.setHeader(message, "X-Test", true);
+        HttpRequest message = new DefaultHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, "http://localhost");
+        message.headers().set(of("X-Test"), true);
         HttpContent chunk1 = new DefaultHttpContent(Unpooled.copiedBuffer("test", CharsetUtil.US_ASCII));
         HttpContent chunk2 = new DefaultHttpContent(Unpooled.copiedBuffer("test2", CharsetUtil.US_ASCII));
         HttpContent chunk3 = new DefaultLastHttpContent(Unpooled.EMPTY_BUFFER);
@@ -50,13 +60,13 @@ public class HttpObjectAggregatorTest {
         // this should trigger a channelRead event so return true
         assertTrue(embedder.writeInbound(chunk3));
         assertTrue(embedder.finish());
-        FullHttpRequest aggratedMessage = embedder.readInbound();
-        assertNotNull(aggratedMessage);
+        FullHttpRequest aggregatedMessage = embedder.readInbound();
+        assertNotNull(aggregatedMessage);
 
         assertEquals(chunk1.content().readableBytes() + chunk2.content().readableBytes(),
-                HttpHeaders.getContentLength(aggratedMessage));
-        assertEquals(aggratedMessage.headers().get("X-Test"), Boolean.TRUE.toString());
-        checkContentBuffer(aggratedMessage);
+                HttpUtil.getContentLength(aggregatedMessage));
+        assertEquals(Boolean.TRUE.toString(), aggregatedMessage.headers().get(of("X-Test")));
+        checkContentBuffer(aggregatedMessage);
         assertNull(embedder.readInbound());
     }
 
@@ -76,14 +86,13 @@ public class HttpObjectAggregatorTest {
     public void testAggregateWithTrailer() {
         HttpObjectAggregator aggr = new HttpObjectAggregator(1024 * 1024);
         EmbeddedChannel embedder = new EmbeddedChannel(aggr);
-        HttpRequest message = new DefaultHttpRequest(HttpVersion.HTTP_1_1,
-                HttpMethod.GET, "http://localhost");
-        HttpHeaders.setHeader(message, "X-Test", true);
-        HttpHeaders.setTransferEncodingChunked(message);
+        HttpRequest message = new DefaultHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, "http://localhost");
+        message.headers().set(of("X-Test"), true);
+        HttpUtil.setTransferEncodingChunked(message, true);
         HttpContent chunk1 = new DefaultHttpContent(Unpooled.copiedBuffer("test", CharsetUtil.US_ASCII));
         HttpContent chunk2 = new DefaultHttpContent(Unpooled.copiedBuffer("test2", CharsetUtil.US_ASCII));
         LastHttpContent trailer = new DefaultLastHttpContent();
-        trailer.trailingHeaders().set("X-Trailer", true);
+        trailer.trailingHeaders().set(of("X-Trailer"), true);
 
         assertFalse(embedder.writeInbound(message));
         assertFalse(embedder.writeInbound(chunk1));
@@ -92,55 +101,115 @@ public class HttpObjectAggregatorTest {
         // this should trigger a channelRead event so return true
         assertTrue(embedder.writeInbound(trailer));
         assertTrue(embedder.finish());
-        FullHttpRequest aggratedMessage = embedder.readInbound();
-        assertNotNull(aggratedMessage);
+        FullHttpRequest aggregatedMessage = embedder.readInbound();
+        assertNotNull(aggregatedMessage);
 
         assertEquals(chunk1.content().readableBytes() + chunk2.content().readableBytes(),
-                HttpHeaders.getContentLength(aggratedMessage));
-        assertEquals(aggratedMessage.headers().get("X-Test"), Boolean.TRUE.toString());
-        assertEquals(aggratedMessage.headers().get("X-Trailer"), Boolean.TRUE.toString());
-        checkContentBuffer(aggratedMessage);
+                HttpUtil.getContentLength(aggregatedMessage));
+        assertEquals(Boolean.TRUE.toString(), aggregatedMessage.headers().get(of("X-Test")));
+        assertEquals(Boolean.TRUE.toString(), aggregatedMessage.trailingHeaders().get(of("X-Trailer")));
+        checkContentBuffer(aggregatedMessage);
         assertNull(embedder.readInbound());
     }
 
     @Test
-    public void testTooLongFrameException() {
-        HttpObjectAggregator aggr = new HttpObjectAggregator(4);
-        EmbeddedChannel embedder = new EmbeddedChannel(aggr);
-        HttpRequest message = new DefaultHttpRequest(HttpVersion.HTTP_1_1,
-                HttpMethod.GET, "http://localhost");
-        HttpContent chunk1 = releaseLater(new DefaultHttpContent(Unpooled.copiedBuffer("test", CharsetUtil.US_ASCII)));
-        HttpContent chunk2 = releaseLater(new DefaultHttpContent(Unpooled.copiedBuffer("test2", CharsetUtil.US_ASCII)));
-        HttpContent chunk3 = releaseLater(new DefaultHttpContent(Unpooled.copiedBuffer("test3", CharsetUtil.US_ASCII)));
-        HttpContent chunk4 = LastHttpContent.EMPTY_LAST_CONTENT;
+    public void testOversizedRequest() {
+        EmbeddedChannel embedder = new EmbeddedChannel(new HttpObjectAggregator(4));
+        HttpRequest message = new DefaultHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.PUT, "http://localhost");
+        HttpContent chunk1 = new DefaultHttpContent(Unpooled.copiedBuffer("test", CharsetUtil.US_ASCII));
+        HttpContent chunk2 = new DefaultHttpContent(Unpooled.copiedBuffer("test2", CharsetUtil.US_ASCII));
+        HttpContent chunk3 = LastHttpContent.EMPTY_LAST_CONTENT;
 
         assertFalse(embedder.writeInbound(message));
-        assertFalse(embedder.writeInbound(chunk1.copy()));
+        assertFalse(embedder.writeInbound(chunk1));
+        assertFalse(embedder.writeInbound(chunk2));
+
+        FullHttpResponse response = embedder.readOutbound();
+        assertEquals(HttpResponseStatus.REQUEST_ENTITY_TOO_LARGE, response.status());
+        assertEquals("0", response.headers().get(HttpHeaderNames.CONTENT_LENGTH));
+        assertFalse(embedder.isOpen());
+
         try {
-            embedder.writeInbound(chunk2.copy());
+            assertFalse(embedder.writeInbound(chunk3));
             fail();
-        } catch (TooLongFrameException e) {
-            // expected
+        } catch (Exception e) {
+            assertTrue(e instanceof ClosedChannelException);
         }
-        assertFalse(embedder.writeInbound(chunk3.copy()));
-        assertFalse(embedder.writeInbound(chunk4.copy()));
+
+        assertFalse(embedder.finish());
+    }
+
+    @Test
+    public void testOversizedRequestWithoutKeepAlive() {
+        // send a HTTP/1.0 request with no keep-alive header
+        HttpRequest message = new DefaultHttpRequest(HttpVersion.HTTP_1_0, HttpMethod.PUT, "http://localhost");
+        HttpUtil.setContentLength(message, 5);
+        checkOversizedRequest(message);
+    }
+
+    @Test
+    public void testOversizedRequestWithContentLength() {
+        HttpRequest message = new DefaultHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.PUT, "http://localhost");
+        HttpUtil.setContentLength(message, 5);
+        checkOversizedRequest(message);
+    }
+
+    private static void checkOversizedRequest(HttpRequest message) {
+        EmbeddedChannel embedder = new EmbeddedChannel(new HttpObjectAggregator(4));
 
         assertFalse(embedder.writeInbound(message));
-        assertFalse(embedder.writeInbound(chunk1.copy()));
-        try {
-            embedder.writeInbound(chunk2.copy());
-            fail();
-        } catch (TooLongFrameException e) {
-            // expected
+        HttpResponse response = embedder.readOutbound();
+        assertEquals(HttpResponseStatus.REQUEST_ENTITY_TOO_LARGE, response.status());
+        assertEquals("0", response.headers().get(HttpHeaderNames.CONTENT_LENGTH));
+
+        if (serverShouldCloseConnection(message, response)) {
+            assertFalse(embedder.isOpen());
+            assertFalse(embedder.finish());
+        } else {
+            assertTrue(embedder.isOpen());
         }
-        assertFalse(embedder.writeInbound(chunk3.copy()));
-        assertFalse(embedder.writeInbound(chunk4.copy()));
-        embedder.finish();
+    }
+
+    private static boolean serverShouldCloseConnection(HttpRequest message, HttpResponse response) {
+        // If the response wasn't keep-alive, the server should close the connection.
+        if (!HttpUtil.isKeepAlive(response)) {
+            return true;
+        }
+        // The connection should only be kept open if Expect: 100-continue is set,
+        // or if keep-alive is on.
+        if (HttpUtil.is100ContinueExpected(message)) {
+            return false;
+        }
+        if (HttpUtil.isKeepAlive(message)) {
+            return false;
+        }
+        return true;
+    }
+
+    @Test
+    public void testOversizedResponse() {
+        EmbeddedChannel embedder = new EmbeddedChannel(new HttpObjectAggregator(4));
+        HttpResponse message = new DefaultHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK);
+        HttpContent chunk1 = new DefaultHttpContent(Unpooled.copiedBuffer("test", CharsetUtil.US_ASCII));
+        HttpContent chunk2 = new DefaultHttpContent(Unpooled.copiedBuffer("test2", CharsetUtil.US_ASCII));
+
+        assertFalse(embedder.writeInbound(message));
+        assertFalse(embedder.writeInbound(chunk1));
+
+        try {
+            embedder.writeInbound(chunk2);
+            fail();
+        } catch (TooLongFrameException expected) {
+            // Expected
+        }
+
+        assertFalse(embedder.isOpen());
+        assertFalse(embedder.finish());
     }
 
     @Test(expected = IllegalArgumentException.class)
     public void testInvalidConstructorUsage() {
-        new HttpObjectAggregator(0);
+        new HttpObjectAggregator(-1);
     }
 
     @Test(expected = IllegalArgumentException.class)
@@ -152,9 +221,9 @@ public class HttpObjectAggregatorTest {
     @Test(expected = IllegalStateException.class)
     public void testSetMaxCumulationBufferComponentsAfterInit() throws Exception {
         HttpObjectAggregator aggr = new HttpObjectAggregator(Integer.MAX_VALUE);
-        ChannelHandlerContext ctx = EasyMock.createMock(ChannelHandlerContext.class);
-        EasyMock.replay(ctx);
+        ChannelHandlerContext ctx = Mockito.mock(ChannelHandlerContext.class);
         aggr.handlerAdded(ctx);
+        Mockito.verifyNoMoreInteractions(ctx);
         aggr.setMaxCumulationBufferComponents(10);
     }
 
@@ -163,10 +232,9 @@ public class HttpObjectAggregatorTest {
         HttpObjectAggregator aggr = new HttpObjectAggregator(1024 * 1024);
         EmbeddedChannel embedder = new EmbeddedChannel(aggr);
 
-        HttpRequest message = new DefaultHttpRequest(HttpVersion.HTTP_1_1,
-                HttpMethod.GET, "http://localhost");
-        HttpHeaders.setHeader(message, "X-Test", true);
-        HttpHeaders.setHeader(message, "Transfer-Encoding", "Chunked");
+        HttpRequest message = new DefaultHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.PUT, "http://localhost");
+        message.headers().set(of("X-Test"), true);
+        message.headers().set(of("Transfer-Encoding"), of("Chunked"));
         HttpContent chunk1 = new DefaultHttpContent(Unpooled.copiedBuffer("test", CharsetUtil.US_ASCII));
         HttpContent chunk2 = new DefaultHttpContent(Unpooled.copiedBuffer("test2", CharsetUtil.US_ASCII));
         HttpContent chunk3 = LastHttpContent.EMPTY_LAST_CONTENT;
@@ -177,13 +245,276 @@ public class HttpObjectAggregatorTest {
         // this should trigger a channelRead event so return true
         assertTrue(embedder.writeInbound(chunk3));
         assertTrue(embedder.finish());
-        FullHttpRequest aggratedMessage = embedder.readInbound();
-        assertNotNull(aggratedMessage);
+        FullHttpRequest aggregatedMessage = embedder.readInbound();
+        assertNotNull(aggregatedMessage);
 
         assertEquals(chunk1.content().readableBytes() + chunk2.content().readableBytes(),
-                HttpHeaders.getContentLength(aggratedMessage));
-        assertEquals(aggratedMessage.headers().get("X-Test"), Boolean.TRUE.toString());
-        checkContentBuffer(aggratedMessage);
+                HttpUtil.getContentLength(aggregatedMessage));
+        assertEquals(Boolean.TRUE.toString(), aggregatedMessage.headers().get(of("X-Test")));
+        checkContentBuffer(aggregatedMessage);
         assertNull(embedder.readInbound());
+    }
+
+    @Test
+    public void testBadRequest() {
+        EmbeddedChannel ch = new EmbeddedChannel(new HttpRequestDecoder(), new HttpObjectAggregator(1024 * 1024));
+        ch.writeInbound(Unpooled.copiedBuffer("GET / HTTP/1.0 with extra\r\n", CharsetUtil.UTF_8));
+        Object inbound = ch.readInbound();
+        assertThat(inbound, is(instanceOf(FullHttpRequest.class)));
+        assertTrue(((DecoderResultProvider) inbound).decoderResult().isFailure());
+        assertNull(ch.readInbound());
+        ch.finish();
+    }
+
+    @Test
+    public void testBadResponse() throws Exception {
+        EmbeddedChannel ch = new EmbeddedChannel(new HttpResponseDecoder(), new HttpObjectAggregator(1024 * 1024));
+        ch.writeInbound(Unpooled.copiedBuffer("HTTP/1.0 BAD_CODE Bad Server\r\n", CharsetUtil.UTF_8));
+        Object inbound = ch.readInbound();
+        assertThat(inbound, is(instanceOf(FullHttpResponse.class)));
+        assertTrue(((DecoderResultProvider) inbound).decoderResult().isFailure());
+        assertNull(ch.readInbound());
+        ch.finish();
+    }
+
+    @Test
+    public void testOversizedRequestWith100Continue() {
+        EmbeddedChannel embedder = new EmbeddedChannel(new HttpObjectAggregator(8));
+
+        // Send an oversized request with 100 continue.
+        HttpRequest message = new DefaultHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.PUT, "http://localhost");
+        HttpUtil.set100ContinueExpected(message, true);
+        HttpUtil.setContentLength(message, 16);
+
+        HttpContent chunk1 = new DefaultHttpContent(Unpooled.copiedBuffer("some", CharsetUtil.US_ASCII));
+        HttpContent chunk2 = new DefaultHttpContent(Unpooled.copiedBuffer("test", CharsetUtil.US_ASCII));
+        HttpContent chunk3 = LastHttpContent.EMPTY_LAST_CONTENT;
+
+        // Send a request with 100-continue + large Content-Length header value.
+        assertFalse(embedder.writeInbound(message));
+
+        // The aggregator should respond with '413.'
+        FullHttpResponse response = embedder.readOutbound();
+        assertEquals(HttpResponseStatus.REQUEST_ENTITY_TOO_LARGE, response.status());
+        assertEquals("0", response.headers().get(HttpHeaderNames.CONTENT_LENGTH));
+
+        // An ill-behaving client could continue to send data without a respect, and such data should be discarded.
+        assertFalse(embedder.writeInbound(chunk1));
+
+        // The aggregator should not close the connection because keep-alive is on.
+        assertTrue(embedder.isOpen());
+
+        // Now send a valid request.
+        HttpRequest message2 = new DefaultHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.PUT, "http://localhost");
+
+        assertFalse(embedder.writeInbound(message2));
+        assertFalse(embedder.writeInbound(chunk2));
+        assertTrue(embedder.writeInbound(chunk3));
+
+        FullHttpRequest fullMsg = embedder.readInbound();
+        assertNotNull(fullMsg);
+
+        assertEquals(
+                chunk2.content().readableBytes() + chunk3.content().readableBytes(),
+                HttpUtil.getContentLength(fullMsg));
+
+        assertEquals(HttpUtil.getContentLength(fullMsg), fullMsg.content().readableBytes());
+
+        fullMsg.release();
+        assertFalse(embedder.finish());
+    }
+
+    @Test
+    public void testUnsupportedExpectHeaderExpectation() {
+        runUnsupportedExceptHeaderExceptionTest(true);
+        runUnsupportedExceptHeaderExceptionTest(false);
+    }
+
+    private static void runUnsupportedExceptHeaderExceptionTest(final boolean close) {
+        final HttpObjectAggregator aggregator;
+        final int maxContentLength = 4;
+        if (close) {
+            aggregator = new HttpObjectAggregator(maxContentLength, true);
+        } else {
+            aggregator = new HttpObjectAggregator(maxContentLength);
+        }
+        final EmbeddedChannel embedder = new EmbeddedChannel(new HttpRequestDecoder(), aggregator);
+
+        assertFalse(embedder.writeInbound(Unpooled.copiedBuffer(
+                "GET / HTTP/1.1\r\n" +
+                        "Expect: chocolate=yummy\r\n" +
+                        "Content-Length: 100\r\n\r\n", CharsetUtil.US_ASCII)));
+        assertNull(embedder.readInbound());
+
+        final FullHttpResponse response = embedder.readOutbound();
+        assertEquals(HttpResponseStatus.EXPECTATION_FAILED, response.status());
+        assertEquals("0", response.headers().get(HttpHeaderNames.CONTENT_LENGTH));
+        response.release();
+
+        if (close) {
+            assertFalse(embedder.isOpen());
+        } else {
+            // keep-alive is on by default in HTTP/1.1, so the connection should be still alive
+            assertTrue(embedder.isOpen());
+
+            // the decoder should be reset by the aggregator at this point and be able to decode the next request
+            assertTrue(embedder.writeInbound(Unpooled.copiedBuffer("GET / HTTP/1.1\r\n\r\n", CharsetUtil.US_ASCII)));
+
+            final FullHttpRequest request = embedder.readInbound();
+            assertThat(request.method(), is(HttpMethod.GET));
+            assertThat(request.uri(), is("/"));
+            assertThat(request.content().readableBytes(), is(0));
+            request.release();
+        }
+
+        assertFalse(embedder.finish());
+    }
+
+    @Test
+    public void testValidRequestWith100ContinueAndDecoder() {
+        EmbeddedChannel embedder = new EmbeddedChannel(new HttpRequestDecoder(), new HttpObjectAggregator(100));
+        embedder.writeInbound(Unpooled.copiedBuffer(
+            "GET /upload HTTP/1.1\r\n" +
+                "Expect: 100-continue\r\n" +
+                "Content-Length: 0\r\n\r\n", CharsetUtil.US_ASCII));
+
+        FullHttpResponse response = embedder.readOutbound();
+        assertEquals(HttpResponseStatus.CONTINUE, response.status());
+        FullHttpRequest request = embedder.readInbound();
+        assertFalse(request.headers().contains(HttpHeaderNames.EXPECT));
+        request.release();
+        response.release();
+        assertFalse(embedder.finish());
+    }
+
+    @Test
+    public void testOversizedRequestWith100ContinueAndDecoder() {
+        EmbeddedChannel embedder = new EmbeddedChannel(new HttpRequestDecoder(), new HttpObjectAggregator(4));
+        embedder.writeInbound(Unpooled.copiedBuffer(
+                "PUT /upload HTTP/1.1\r\n" +
+                        "Expect: 100-continue\r\n" +
+                        "Content-Length: 100\r\n\r\n", CharsetUtil.US_ASCII));
+
+        assertNull(embedder.readInbound());
+
+        FullHttpResponse response = embedder.readOutbound();
+        assertEquals(HttpResponseStatus.REQUEST_ENTITY_TOO_LARGE, response.status());
+        assertEquals("0", response.headers().get(HttpHeaderNames.CONTENT_LENGTH));
+
+        // Keep-alive is on by default in HTTP/1.1, so the connection should be still alive.
+        assertTrue(embedder.isOpen());
+
+        // The decoder should be reset by the aggregator at this point and be able to decode the next request.
+        embedder.writeInbound(Unpooled.copiedBuffer("GET /max-upload-size HTTP/1.1\r\n\r\n", CharsetUtil.US_ASCII));
+
+        FullHttpRequest request = embedder.readInbound();
+        assertThat(request.method(), is(HttpMethod.GET));
+        assertThat(request.uri(), is("/max-upload-size"));
+        assertThat(request.content().readableBytes(), is(0));
+        request.release();
+
+        assertFalse(embedder.finish());
+    }
+
+    @Test
+    public void testOversizedRequestWith100ContinueAndDecoderCloseConnection() {
+        EmbeddedChannel embedder = new EmbeddedChannel(new HttpRequestDecoder(), new HttpObjectAggregator(4, true));
+        embedder.writeInbound(Unpooled.copiedBuffer(
+                "PUT /upload HTTP/1.1\r\n" +
+                        "Expect: 100-continue\r\n" +
+                        "Content-Length: 100\r\n\r\n", CharsetUtil.US_ASCII));
+
+        assertNull(embedder.readInbound());
+
+        FullHttpResponse response = embedder.readOutbound();
+        assertEquals(HttpResponseStatus.REQUEST_ENTITY_TOO_LARGE, response.status());
+        assertEquals("0", response.headers().get(HttpHeaderNames.CONTENT_LENGTH));
+
+        // We are forcing the connection closed if an expectation is exceeded.
+        assertFalse(embedder.isOpen());
+        assertFalse(embedder.finish());
+    }
+
+    @Test
+    public void testRequestAfterOversized100ContinueAndDecoder() {
+        EmbeddedChannel embedder = new EmbeddedChannel(new HttpRequestDecoder(), new HttpObjectAggregator(15));
+
+        // Write first request with Expect: 100-continue.
+        HttpRequest message = new DefaultHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.PUT, "http://localhost");
+        HttpUtil.set100ContinueExpected(message, true);
+        HttpUtil.setContentLength(message, 16);
+
+        HttpContent chunk1 = new DefaultHttpContent(Unpooled.copiedBuffer("some", CharsetUtil.US_ASCII));
+        HttpContent chunk2 = new DefaultHttpContent(Unpooled.copiedBuffer("test", CharsetUtil.US_ASCII));
+        HttpContent chunk3 = LastHttpContent.EMPTY_LAST_CONTENT;
+
+        // Send a request with 100-continue + large Content-Length header value.
+        assertFalse(embedder.writeInbound(message));
+
+        // The aggregator should respond with '413'.
+        FullHttpResponse response = embedder.readOutbound();
+        assertEquals(HttpResponseStatus.REQUEST_ENTITY_TOO_LARGE, response.status());
+        assertEquals("0", response.headers().get(HttpHeaderNames.CONTENT_LENGTH));
+
+        // An ill-behaving client could continue to send data without a respect, and such data should be discarded.
+        assertFalse(embedder.writeInbound(chunk1));
+
+        // The aggregator should not close the connection because keep-alive is on.
+        assertTrue(embedder.isOpen());
+
+        // Now send a valid request.
+        HttpRequest message2 = new DefaultHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.PUT, "http://localhost");
+
+        assertFalse(embedder.writeInbound(message2));
+        assertFalse(embedder.writeInbound(chunk2));
+        assertTrue(embedder.writeInbound(chunk3));
+
+        FullHttpRequest fullMsg = embedder.readInbound();
+        assertNotNull(fullMsg);
+
+        assertEquals(
+                chunk2.content().readableBytes() + chunk3.content().readableBytes(),
+                HttpUtil.getContentLength(fullMsg));
+
+        assertEquals(HttpUtil.getContentLength(fullMsg), fullMsg.content().readableBytes());
+
+        fullMsg.release();
+        assertFalse(embedder.finish());
+    }
+
+    @Test
+    public void testReplaceAggregatedRequest() {
+        EmbeddedChannel embedder = new EmbeddedChannel(new HttpObjectAggregator(1024 * 1024));
+
+        Exception boom = new Exception("boom");
+        HttpRequest req = new DefaultHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, "http://localhost");
+        req.setDecoderResult(DecoderResult.failure(boom));
+
+        assertTrue(embedder.writeInbound(req) && embedder.finish());
+
+        FullHttpRequest aggregatedReq = embedder.readInbound();
+        FullHttpRequest replacedReq = aggregatedReq.replace(Unpooled.EMPTY_BUFFER);
+
+        assertEquals(replacedReq.decoderResult(), aggregatedReq.decoderResult());
+        aggregatedReq.release();
+        replacedReq.release();
+    }
+
+    @Test
+    public void testReplaceAggregatedResponse() {
+        EmbeddedChannel embedder = new EmbeddedChannel(new HttpObjectAggregator(1024 * 1024));
+
+        Exception boom = new Exception("boom");
+        HttpResponse rep = new DefaultHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK);
+        rep.setDecoderResult(DecoderResult.failure(boom));
+
+        assertTrue(embedder.writeInbound(rep) && embedder.finish());
+
+        FullHttpResponse aggregatedRep = embedder.readInbound();
+        FullHttpResponse replacedRep = aggregatedRep.replace(Unpooled.EMPTY_BUFFER);
+
+        assertEquals(replacedRep.decoderResult(), aggregatedRep.decoderResult());
+        aggregatedRep.release();
+        replacedRep.release();
     }
 }

@@ -15,6 +15,10 @@
  */
 package io.netty.channel.nio;
 
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufAllocator;
+import io.netty.buffer.ByteBufUtil;
+import io.netty.buffer.Unpooled;
 import io.netty.channel.AbstractChannel;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelException;
@@ -23,13 +27,17 @@ import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelPromise;
 import io.netty.channel.ConnectTimeoutException;
 import io.netty.channel.EventLoop;
+import io.netty.util.ReferenceCountUtil;
+import io.netty.util.ReferenceCounted;
+import io.netty.util.internal.ThrowableUtil;
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
 
 import java.io.IOException;
-import java.net.ConnectException;
 import java.net.SocketAddress;
 import java.nio.channels.CancelledKeyException;
+import java.nio.channels.ClosedChannelException;
+import java.nio.channels.ConnectionPendingException;
 import java.nio.channels.SelectableChannel;
 import java.nio.channels.SelectionKey;
 import java.util.concurrent.ScheduledFuture;
@@ -43,10 +51,19 @@ public abstract class AbstractNioChannel extends AbstractChannel {
     private static final InternalLogger logger =
             InternalLoggerFactory.getInstance(AbstractNioChannel.class);
 
+    private static final ClosedChannelException DO_CLOSE_CLOSED_CHANNEL_EXCEPTION = ThrowableUtil.unknownStackTrace(
+            new ClosedChannelException(), AbstractNioChannel.class, "doClose()");
+
     private final SelectableChannel ch;
     protected final int readInterestOp;
-    private volatile SelectionKey selectionKey;
-    private volatile boolean inputShutdown;
+    volatile SelectionKey selectionKey;
+    boolean readPending;
+    private final Runnable clearReadPendingRunnable = new Runnable() {
+        @Override
+        public void run() {
+            clearReadPending0();
+        }
+    };
 
     /**
      * The future of the current connection attempt.  If not null, subsequent
@@ -111,17 +128,69 @@ public abstract class AbstractNioChannel extends AbstractChannel {
     }
 
     /**
-     * Return {@code true} if the input of this {@link Channel} is shutdown
+     * @deprecated No longer supported.
+     * No longer supported.
      */
-    protected boolean isInputShutdown() {
-        return inputShutdown;
+    @Deprecated
+    protected boolean isReadPending() {
+        return readPending;
     }
 
     /**
-     * Shutdown the input of this {@link Channel}.
+     * @deprecated Use {@link #clearReadPending()} if appropriate instead.
+     * No longer supported.
      */
-    void setInputShutdown() {
-        inputShutdown = true;
+    @Deprecated
+    protected void setReadPending(final boolean readPending) {
+        if (isRegistered()) {
+            EventLoop eventLoop = eventLoop();
+            if (eventLoop.inEventLoop()) {
+                setReadPending0(readPending);
+            } else {
+                eventLoop.execute(new Runnable() {
+                    @Override
+                    public void run() {
+                        setReadPending0(readPending);
+                    }
+                });
+            }
+        } else {
+            // Best effort if we are not registered yet clear readPending.
+            // NB: We only set the boolean field instead of calling clearReadPending0(), because the SelectionKey is
+            // not set yet so it would produce an assertion failure.
+            this.readPending = readPending;
+        }
+    }
+
+    /**
+     * Set read pending to {@code false}.
+     */
+    protected final void clearReadPending() {
+        if (isRegistered()) {
+            EventLoop eventLoop = eventLoop();
+            if (eventLoop.inEventLoop()) {
+                clearReadPending0();
+            } else {
+                eventLoop.execute(clearReadPendingRunnable);
+            }
+        } else {
+            // Best effort if we are not registered yet clear readPending. This happens during channel initialization.
+            // NB: We only set the boolean field instead of calling clearReadPending0(), because the SelectionKey is
+            // not set yet so it would produce an assertion failure.
+            readPending = false;
+        }
+    }
+
+    private void setReadPending0(boolean readPending) {
+        this.readPending = readPending;
+        if (!readPending) {
+            ((AbstractNioUnsafe) unsafe()).removeReadOp();
+        }
+    }
+
+    private void clearReadPending0() {
+        readPending = false;
+        ((AbstractNioUnsafe) unsafe()).removeReadOp();
     }
 
     /**
@@ -148,13 +217,28 @@ public abstract class AbstractNioChannel extends AbstractChannel {
 
     protected abstract class AbstractNioUnsafe extends AbstractUnsafe implements NioUnsafe {
 
+        protected final void removeReadOp() {
+            SelectionKey key = selectionKey();
+            // Check first if the key is still valid as it may be canceled as part of the deregistration
+            // from the EventLoop
+            // See https://github.com/netty/netty/issues/2104
+            if (!key.isValid()) {
+                return;
+            }
+            int interestOps = key.interestOps();
+            if ((interestOps & readInterestOp) != 0) {
+                // only remove readInterestOp if needed
+                key.interestOps(interestOps & ~readInterestOp);
+            }
+        }
+
         @Override
-        public SelectableChannel ch() {
+        public final SelectableChannel ch() {
             return javaChannel();
         }
 
         @Override
-        public void connect(
+        public final void connect(
                 final SocketAddress remoteAddress, final SocketAddress localAddress, final ChannelPromise promise) {
             if (!promise.setUncancellable() || !ensureOpen(promise)) {
                 return;
@@ -162,7 +246,8 @@ public abstract class AbstractNioChannel extends AbstractChannel {
 
             try {
                 if (connectPromise != null) {
-                    throw new IllegalStateException("connection attempt already made");
+                    // Already a connect in process.
+                    throw new ConnectionPendingException();
                 }
 
                 boolean wasActive = isActive();
@@ -202,12 +287,7 @@ public abstract class AbstractNioChannel extends AbstractChannel {
                     });
                 }
             } catch (Throwable t) {
-                if (t instanceof ConnectException) {
-                    Throwable newT = new ConnectException(t.getMessage() + ": " + remoteAddress);
-                    newT.setStackTrace(t.getStackTrace());
-                    t = newT;
-                }
-                promise.tryFailure(t);
+                promise.tryFailure(annotateConnectException(t, remoteAddress));
                 closeIfClosed();
             }
         }
@@ -218,12 +298,16 @@ public abstract class AbstractNioChannel extends AbstractChannel {
                 return;
             }
 
+            // Get the state as trySuccess() may trigger an ChannelFutureListener that will close the Channel.
+            // We still need to ensure we call fireChannelActive() in this case.
+            boolean active = isActive();
+
             // trySuccess() will return false if a user cancelled the connection attempt.
             boolean promiseSet = promise.trySuccess();
 
             // Regardless if the connection attempt was cancelled, channelActive() event should be triggered,
             // because what happened is what happened.
-            if (!wasActive && isActive()) {
+            if (!wasActive && active) {
                 pipeline().fireChannelActive();
             }
 
@@ -236,6 +320,7 @@ public abstract class AbstractNioChannel extends AbstractChannel {
         private void fulfillConnectPromise(ChannelPromise promise, Throwable cause) {
             if (promise == null) {
                 // Closed via cancellation and the promise has been notified already.
+                return;
             }
 
             // Use tryFailure() instead of setFailure() to avoid the race against cancel().
@@ -244,7 +329,7 @@ public abstract class AbstractNioChannel extends AbstractChannel {
         }
 
         @Override
-        public void finishConnect() {
+        public final void finishConnect() {
             // Note this method is invoked by the event loop only if the connection attempt was
             // neither cancelled nor timed out.
 
@@ -255,13 +340,7 @@ public abstract class AbstractNioChannel extends AbstractChannel {
                 doFinishConnect();
                 fulfillConnectPromise(connectPromise, wasActive);
             } catch (Throwable t) {
-                if (t instanceof ConnectException) {
-                    Throwable newT = new ConnectException(t.getMessage() + ": " + requestedRemoteAddress);
-                    newT.setStackTrace(t.getStackTrace());
-                    t = newT;
-                }
-
-                fulfillConnectPromise(connectPromise, t);
+                fulfillConnectPromise(connectPromise, annotateConnectException(t, requestedRemoteAddress));
             } finally {
                 // Check for null as the connectTimeoutFuture is only created if a connectTimeoutMillis > 0 is used
                 // See https://github.com/netty/netty/issues/1770
@@ -273,7 +352,7 @@ public abstract class AbstractNioChannel extends AbstractChannel {
         }
 
         @Override
-        protected void flush0() {
+        protected final void flush0() {
             // Flush immediately only when there's no pending flush.
             // If there's a pending flush operation, event loop will call forceFlush() later,
             // and thus there's no need to call it now.
@@ -284,7 +363,7 @@ public abstract class AbstractNioChannel extends AbstractChannel {
         }
 
         @Override
-        public void forceFlush() {
+        public final void forceFlush() {
             // directly call super.flush0() to force a flush now
             super.flush0();
         }
@@ -305,7 +384,7 @@ public abstract class AbstractNioChannel extends AbstractChannel {
         boolean selected = false;
         for (;;) {
             try {
-                selectionKey = javaChannel().register(eventLoop().selector, 0, this);
+                selectionKey = javaChannel().register(eventLoop().unwrappedSelector(), 0, this);
                 return;
             } catch (CancelledKeyException e) {
                 if (!selected) {
@@ -329,14 +408,13 @@ public abstract class AbstractNioChannel extends AbstractChannel {
 
     @Override
     protected void doBeginRead() throws Exception {
-        if (inputShutdown) {
-            return;
-        }
-
+        // Channel.read() or ChannelHandlerContext.read() was called
         final SelectionKey selectionKey = this.selectionKey;
         if (!selectionKey.isValid()) {
             return;
         }
+
+        readPending = true;
 
         final int interestOps = selectionKey.interestOps();
         if ((interestOps & readInterestOp) == 0) {
@@ -353,4 +431,89 @@ public abstract class AbstractNioChannel extends AbstractChannel {
      * Finish the connect
      */
     protected abstract void doFinishConnect() throws Exception;
+
+    /**
+     * Returns an off-heap copy of the specified {@link ByteBuf}, and releases the original one.
+     * Note that this method does not create an off-heap copy if the allocation / deallocation cost is too high,
+     * but just returns the original {@link ByteBuf}..
+     */
+    protected final ByteBuf newDirectBuffer(ByteBuf buf) {
+        final int readableBytes = buf.readableBytes();
+        if (readableBytes == 0) {
+            ReferenceCountUtil.safeRelease(buf);
+            return Unpooled.EMPTY_BUFFER;
+        }
+
+        final ByteBufAllocator alloc = alloc();
+        if (alloc.isDirectBufferPooled()) {
+            ByteBuf directBuf = alloc.directBuffer(readableBytes);
+            directBuf.writeBytes(buf, buf.readerIndex(), readableBytes);
+            ReferenceCountUtil.safeRelease(buf);
+            return directBuf;
+        }
+
+        final ByteBuf directBuf = ByteBufUtil.threadLocalDirectBuffer();
+        if (directBuf != null) {
+            directBuf.writeBytes(buf, buf.readerIndex(), readableBytes);
+            ReferenceCountUtil.safeRelease(buf);
+            return directBuf;
+        }
+
+        // Allocating and deallocating an unpooled direct buffer is very expensive; give up.
+        return buf;
+    }
+
+    /**
+     * Returns an off-heap copy of the specified {@link ByteBuf}, and releases the specified holder.
+     * The caller must ensure that the holder releases the original {@link ByteBuf} when the holder is released by
+     * this method.  Note that this method does not create an off-heap copy if the allocation / deallocation cost is
+     * too high, but just returns the original {@link ByteBuf}..
+     */
+    protected final ByteBuf newDirectBuffer(ReferenceCounted holder, ByteBuf buf) {
+        final int readableBytes = buf.readableBytes();
+        if (readableBytes == 0) {
+            ReferenceCountUtil.safeRelease(holder);
+            return Unpooled.EMPTY_BUFFER;
+        }
+
+        final ByteBufAllocator alloc = alloc();
+        if (alloc.isDirectBufferPooled()) {
+            ByteBuf directBuf = alloc.directBuffer(readableBytes);
+            directBuf.writeBytes(buf, buf.readerIndex(), readableBytes);
+            ReferenceCountUtil.safeRelease(holder);
+            return directBuf;
+        }
+
+        final ByteBuf directBuf = ByteBufUtil.threadLocalDirectBuffer();
+        if (directBuf != null) {
+            directBuf.writeBytes(buf, buf.readerIndex(), readableBytes);
+            ReferenceCountUtil.safeRelease(holder);
+            return directBuf;
+        }
+
+        // Allocating and deallocating an unpooled direct buffer is very expensive; give up.
+        if (holder != buf) {
+            // Ensure to call holder.release() to give the holder a chance to release other resources than its content.
+            buf.retain();
+            ReferenceCountUtil.safeRelease(holder);
+        }
+
+        return buf;
+    }
+
+    @Override
+    protected void doClose() throws Exception {
+        ChannelPromise promise = connectPromise;
+        if (promise != null) {
+            // Use tryFailure() instead of setFailure() to avoid the race against cancel().
+            promise.tryFailure(DO_CLOSE_CLOSED_CHANNEL_EXCEPTION);
+            connectPromise = null;
+        }
+
+        ScheduledFuture<?> future = connectTimeoutFuture;
+        if (future != null) {
+            future.cancel(false);
+            connectTimeoutFuture = null;
+        }
+    }
 }

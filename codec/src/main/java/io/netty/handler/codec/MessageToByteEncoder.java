@@ -49,14 +49,14 @@ public abstract class MessageToByteEncoder<I> extends ChannelOutboundHandlerAdap
     private final boolean preferDirect;
 
     /**
-     * @see {@link #MessageToByteEncoder(boolean)} with {@code true} as boolean parameter.
+     * see {@link #MessageToByteEncoder(boolean)} with {@code true} as boolean parameter.
      */
     protected MessageToByteEncoder() {
         this(true);
     }
 
     /**
-     * @see {@link #MessageToByteEncoder(Class, boolean)} with {@code true} as boolean value.
+     * see {@link #MessageToByteEncoder(Class, boolean)} with {@code true} as boolean value.
      */
     protected MessageToByteEncoder(Class<? extends I> outboundMessageType) {
         this(outboundMessageType, true);
@@ -77,7 +77,7 @@ public abstract class MessageToByteEncoder<I> extends ChannelOutboundHandlerAdap
     /**
      * Create a new instance
      *
-     * @param outboundMessageType   The tpye of messages to match
+     * @param outboundMessageType   The type of messages to match
      * @param preferDirect          {@code true} if a direct {@link ByteBuf} should be tried to be used as target for
      *                              the encoded messages. If {@code false} is used it will allocate a heap
      *                              {@link ByteBuf}, which is backed by an byte array.
@@ -102,11 +102,7 @@ public abstract class MessageToByteEncoder<I> extends ChannelOutboundHandlerAdap
             if (acceptOutboundMessage(msg)) {
                 @SuppressWarnings("unchecked")
                 I cast = (I) msg;
-                if (preferDirect) {
-                    buf = ctx.alloc().ioBuffer();
-                } else {
-                    buf = ctx.alloc().heapBuffer();
-                }
+                buf = allocateBuffer(ctx, cast, preferDirect);
                 try {
                     encode(ctx, cast, buf);
                 } finally {
@@ -135,13 +131,30 @@ public abstract class MessageToByteEncoder<I> extends ChannelOutboundHandlerAdap
     }
 
     /**
+     * Allocate a {@link ByteBuf} which will be used as argument of {@link #encode(ChannelHandlerContext, I, ByteBuf)}.
+     * Sub-classes may override this method to return {@link ByteBuf} with a perfect matching {@code initialCapacity}.
+     */
+    protected ByteBuf allocateBuffer(ChannelHandlerContext ctx, @SuppressWarnings("unused") I msg,
+                               boolean preferDirect) throws Exception {
+        if (preferDirect) {
+            return ctx.alloc().ioBuffer();
+        } else {
+            return ctx.alloc().heapBuffer();
+        }
+    }
+
+    /**
      * Encode a message into a {@link ByteBuf}. This method will be called for each written message that can be handled
      * by this encoder.
      *
      * @param ctx           the {@link ChannelHandlerContext} which this {@link MessageToByteEncoder} belongs to
      * @param msg           the message to encode
      * @param out           the {@link ByteBuf} into which the encoded message will be written
-     * @throws Exception    is thrown if an error accour
+     * @throws Exception    is thrown if an error occurs
      */
     protected abstract void encode(ChannelHandlerContext ctx, I msg, ByteBuf out) throws Exception;
+
+    protected boolean isPreferDirect() {
+        return preferDirect;
+    }
 }

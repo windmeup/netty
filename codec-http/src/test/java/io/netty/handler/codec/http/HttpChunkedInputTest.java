@@ -15,9 +15,9 @@
  */
 package io.netty.handler.codec.http;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
 import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufAllocator;
+import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.stream.ChunkedFile;
 import io.netty.handler.stream.ChunkedInput;
@@ -25,6 +25,7 @@ import io.netty.handler.stream.ChunkedNioFile;
 import io.netty.handler.stream.ChunkedNioStream;
 import io.netty.handler.stream.ChunkedStream;
 import io.netty.handler.stream.ChunkedWriteHandler;
+import org.junit.Test;
 
 import java.io.ByteArrayInputStream;
 import java.io.File;
@@ -32,7 +33,7 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.channels.Channels;
 
-import org.junit.Test;
+import static org.junit.Assert.*;
 
 public class HttpChunkedInputTest {
     private static final byte[] BYTES = new byte[1024 * 64];
@@ -83,6 +84,42 @@ public class HttpChunkedInputTest {
         check(new HttpChunkedInput(new ChunkedNioFile(TMP)));
     }
 
+    @Test
+    public void testWrappedReturnNull() throws Exception {
+        HttpChunkedInput input = new HttpChunkedInput(new ChunkedInput<ByteBuf>() {
+            @Override
+            public boolean isEndOfInput() throws Exception {
+                return false;
+            }
+
+            @Override
+            public void close() throws Exception {
+                // NOOP
+            }
+
+            @Override
+            public ByteBuf readChunk(ChannelHandlerContext ctx) throws Exception {
+                return null;
+            }
+
+            @Override
+            public ByteBuf readChunk(ByteBufAllocator allocator) throws Exception {
+                return null;
+            }
+
+            @Override
+            public long length() {
+                return 0;
+            }
+
+            @Override
+            public long progress() {
+                return 0;
+            }
+        });
+        assertNull(input.readChunk(ByteBufAllocator.DEFAULT));
+    }
+
     private static void check(ChunkedInput<?>... inputs) {
         EmbeddedChannel ch = new EmbeddedChannel(new ChunkedWriteHandler());
 
@@ -96,13 +133,12 @@ public class HttpChunkedInputTest {
         int read = 0;
         HttpContent lastHttpContent = null;
         for (;;) {
-            HttpContent httpContent = (HttpContent) ch.readOutbound();
+            HttpContent httpContent = ch.readOutbound();
             if (httpContent == null) {
                 break;
-            } else {
-                if (lastHttpContent != null) {
-                    assertTrue("Chunk must be DefaultHttpContent", lastHttpContent instanceof DefaultHttpContent);
-                }
+            }
+            if (lastHttpContent != null) {
+                assertTrue("Chunk must be DefaultHttpContent", lastHttpContent instanceof DefaultHttpContent);
             }
 
             ByteBuf buffer = httpContent.content();
@@ -120,6 +156,7 @@ public class HttpChunkedInputTest {
         }
 
         assertEquals(BYTES.length * inputs.length, read);
-        assertTrue("Last chunk must be DefaultLastHttpContent", lastHttpContent == LastHttpContent.EMPTY_LAST_CONTENT);
+        assertSame("Last chunk must be LastHttpContent.EMPTY_LAST_CONTENT",
+                LastHttpContent.EMPTY_LAST_CONTENT, lastHttpContent);
     }
 }

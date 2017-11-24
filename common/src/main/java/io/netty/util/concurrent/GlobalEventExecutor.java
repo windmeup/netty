@@ -18,55 +18,51 @@ package io.netty.util.concurrent;
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
 
-import java.util.Iterator;
-import java.util.PriorityQueue;
 import java.util.Queue;
 import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.Callable;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Single-thread singleton {@link EventExecutor}.  It starts the thread automatically and stops it when there is no
  * task pending in the task queue for 1 second.  Please note it is not scalable to schedule large number of tasks to
  * this executor; use a dedicated executor.
  */
-public final class GlobalEventExecutor extends AbstractEventExecutor {
+public final class GlobalEventExecutor extends AbstractScheduledEventExecutor {
 
     private static final InternalLogger logger = InternalLoggerFactory.getInstance(GlobalEventExecutor.class);
 
-    private static final int ST_NOT_STARTED = 1;
-    private static final int ST_STARTED = 2;
-
-    private static final long SCHEDULE_PURGE_INTERVAL = TimeUnit.SECONDS.toNanos(1);
+    private static final long SCHEDULE_QUIET_PERIOD_INTERVAL = TimeUnit.SECONDS.toNanos(1);
 
     public static final GlobalEventExecutor INSTANCE = new GlobalEventExecutor();
 
-    final Queue<Runnable> taskQueue = new LinkedBlockingQueue<Runnable>();
-    final Queue<ScheduledFutureTask<?>> delayedTaskQueue = new PriorityQueue<ScheduledFutureTask<?>>();
-    final ScheduledFutureTask<Void> purgeTask = new ScheduledFutureTask<Void>(
-            this, delayedTaskQueue, Executors.<Void>callable(new PurgeTask(), null),
-            ScheduledFutureTask.deadlineNanos(SCHEDULE_PURGE_INTERVAL), -SCHEDULE_PURGE_INTERVAL);
+    final BlockingQueue<Runnable> taskQueue = new LinkedBlockingQueue<Runnable>();
+    final ScheduledFutureTask<Void> quietPeriodTask = new ScheduledFutureTask<Void>(
+            this, Executors.<Void>callable(new Runnable() {
+        @Override
+        public void run() {
+            // NOOP
+        }
+    }, null), ScheduledFutureTask.deadlineNanos(SCHEDULE_QUIET_PERIOD_INTERVAL), -SCHEDULE_QUIET_PERIOD_INTERVAL);
 
-    private final ThreadFactory threadFactory = new DefaultThreadFactory(getClass());
+    // because the GlobalEventExecutor is a singleton, tasks submitted to it can come from arbitrary threads and this
+    // can trigger the creation of a thread from arbitrary thread groups; for this reason, the thread factory must not
+    // be sticky about its thread group
+    // visible for testing
+    final ThreadFactory threadFactory =
+            new DefaultThreadFactory(DefaultThreadFactory.toPoolName(getClass()), false, Thread.NORM_PRIORITY, null);
     private final TaskRunner taskRunner = new TaskRunner();
-    private final Object stateLock = new Object();
-
+    private final AtomicBoolean started = new AtomicBoolean();
     volatile Thread thread;
-    private volatile int state = ST_NOT_STARTED;
 
     private final Future<?> terminationFuture = new FailedFuture<Object>(this, new UnsupportedOperationException());
 
     private GlobalEventExecutor() {
-        delayedTaskQueue.add(purgeTask);
-    }
-
-    @Override
-    public EventExecutorGroup parent() {
-        return null;
+        scheduledTaskQueue().add(quietPeriodTask);
     }
 
     /**
@@ -75,10 +71,10 @@ public final class GlobalEventExecutor extends AbstractEventExecutor {
      * @return {@code null} if the executor thread has been interrupted or waken up.
      */
     Runnable takeTask() {
-        BlockingQueue<Runnable> taskQueue = (BlockingQueue<Runnable>) this.taskQueue;
+        BlockingQueue<Runnable> taskQueue = this.taskQueue;
         for (;;) {
-            ScheduledFutureTask<?> delayedTask = delayedTaskQueue.peek();
-            if (delayedTask == null) {
+            ScheduledFutureTask<?> scheduledTask = peekScheduledTask();
+            if (scheduledTask == null) {
                 Runnable task = null;
                 try {
                     task = taskQueue.take();
@@ -87,12 +83,13 @@ public final class GlobalEventExecutor extends AbstractEventExecutor {
                 }
                 return task;
             } else {
-                long delayNanos = delayedTask.delayNanos();
+                long delayNanos = scheduledTask.delayNanos();
                 Runnable task;
                 if (delayNanos > 0) {
                     try {
                         task = taskQueue.poll(delayNanos, TimeUnit.NANOSECONDS);
                     } catch (InterruptedException e) {
+                        // Waken up.
                         return null;
                     }
                 } else {
@@ -100,7 +97,7 @@ public final class GlobalEventExecutor extends AbstractEventExecutor {
                 }
 
                 if (task == null) {
-                    fetchFromDelayedQueue();
+                    fetchFromScheduledTaskQueue();
                     task = taskQueue.poll();
                 }
 
@@ -111,24 +108,12 @@ public final class GlobalEventExecutor extends AbstractEventExecutor {
         }
     }
 
-    private void fetchFromDelayedQueue() {
-        long nanoTime = 0L;
-        for (;;) {
-            ScheduledFutureTask<?> delayedTask = delayedTaskQueue.peek();
-            if (delayedTask == null) {
-                break;
-            }
-
-            if (nanoTime == 0L) {
-                nanoTime = ScheduledFutureTask.nanoTime();
-            }
-
-            if (delayedTask.deadlineNanos() <= nanoTime) {
-                delayedTaskQueue.remove();
-                taskQueue.add(delayedTask);
-            } else {
-                break;
-            }
+    private void fetchFromScheduledTaskQueue() {
+        long nanoTime = AbstractScheduledEventExecutor.nanoTime();
+        Runnable scheduledTask = pollScheduledTask(nanoTime);
+        while (scheduledTask != null) {
+            taskQueue.add(scheduledTask);
+            scheduledTask = pollScheduledTask(nanoTime);
         }
     }
 
@@ -194,6 +179,27 @@ public final class GlobalEventExecutor extends AbstractEventExecutor {
         return false;
     }
 
+    /**
+     * Waits until the worker thread of this executor has no tasks left in its task queue and terminates itself.
+     * Because a new worker thread will be started again when a new task is submitted, this operation is only useful
+     * when you want to ensure that the worker thread is terminated <strong>after</strong> your application is shut
+     * down and there's no chance of submitting a new task afterwards.
+     *
+     * @return {@code true} if and only if the worker thread has been terminated
+     */
+    public boolean awaitInactivity(long timeout, TimeUnit unit) throws InterruptedException {
+        if (unit == null) {
+            throw new NullPointerException("unit");
+        }
+
+        final Thread thread = this.thread;
+        if (thread == null) {
+            throw new IllegalStateException("thread was not started");
+        }
+        thread.join(unit.toMillis(timeout));
+        return !thread.isAlive();
+    }
+
     @Override
     public void execute(Runnable task) {
         if (task == null) {
@@ -206,112 +212,14 @@ public final class GlobalEventExecutor extends AbstractEventExecutor {
         }
     }
 
-    // ScheduledExecutorService implementation
-
-    @Override
-    public ScheduledFuture<?> schedule(Runnable command, long delay, TimeUnit unit) {
-        if (command == null) {
-            throw new NullPointerException("command");
-        }
-        if (unit == null) {
-            throw new NullPointerException("unit");
-        }
-        if (delay < 0) {
-            throw new IllegalArgumentException(
-                    String.format("delay: %d (expected: >= 0)", delay));
-        }
-        return schedule(new ScheduledFutureTask<Void>(
-                this, delayedTaskQueue, command, null, ScheduledFutureTask.deadlineNanos(unit.toNanos(delay))));
-    }
-
-    @Override
-    public <V> ScheduledFuture<V> schedule(Callable<V> callable, long delay, TimeUnit unit) {
-        if (callable == null) {
-            throw new NullPointerException("callable");
-        }
-        if (unit == null) {
-            throw new NullPointerException("unit");
-        }
-        if (delay < 0) {
-            throw new IllegalArgumentException(
-                    String.format("delay: %d (expected: >= 0)", delay));
-        }
-        return schedule(new ScheduledFutureTask<V>(
-                this, delayedTaskQueue, callable, ScheduledFutureTask.deadlineNanos(unit.toNanos(delay))));
-    }
-
-    @Override
-    public ScheduledFuture<?> scheduleAtFixedRate(Runnable command, long initialDelay, long period, TimeUnit unit) {
-        if (command == null) {
-            throw new NullPointerException("command");
-        }
-        if (unit == null) {
-            throw new NullPointerException("unit");
-        }
-        if (initialDelay < 0) {
-            throw new IllegalArgumentException(
-                    String.format("initialDelay: %d (expected: >= 0)", initialDelay));
-        }
-        if (period <= 0) {
-            throw new IllegalArgumentException(
-                    String.format("period: %d (expected: > 0)", period));
-        }
-
-        return schedule(new ScheduledFutureTask<Void>(
-                this, delayedTaskQueue, Executors.<Void>callable(command, null),
-                ScheduledFutureTask.deadlineNanos(unit.toNanos(initialDelay)), unit.toNanos(period)));
-    }
-
-    @Override
-    public ScheduledFuture<?> scheduleWithFixedDelay(Runnable command, long initialDelay, long delay, TimeUnit unit) {
-        if (command == null) {
-            throw new NullPointerException("command");
-        }
-        if (unit == null) {
-            throw new NullPointerException("unit");
-        }
-        if (initialDelay < 0) {
-            throw new IllegalArgumentException(
-                    String.format("initialDelay: %d (expected: >= 0)", initialDelay));
-        }
-        if (delay <= 0) {
-            throw new IllegalArgumentException(
-                    String.format("delay: %d (expected: > 0)", delay));
-        }
-
-        return schedule(new ScheduledFutureTask<Void>(
-                this, delayedTaskQueue, Executors.<Void>callable(command, null),
-                ScheduledFutureTask.deadlineNanos(unit.toNanos(initialDelay)), -unit.toNanos(delay)));
-    }
-
-    private <V> ScheduledFuture<V> schedule(final ScheduledFutureTask<V> task) {
-        if (task == null) {
-            throw new NullPointerException("task");
-        }
-
-        if (inEventLoop()) {
-            delayedTaskQueue.add(task);
-        } else {
-            execute(new Runnable() {
-                @Override
-                public void run() {
-                    delayedTaskQueue.add(task);
-                }
-            });
-        }
-
-        return task;
-    }
-
     private void startThread() {
-        synchronized (stateLock) {
-            if (state == ST_NOT_STARTED) {
-                state = ST_STARTED;
-
-                thread = threadFactory.newThread(taskRunner);
-
-                thread.start();
-            }
+        if (started.compareAndSet(false, true)) {
+            Thread t = threadFactory.newThread(taskRunner);
+            // Set the thread before starting it as otherwise inEventLoop() may return false and so produce
+            // an assert error.
+            // See https://github.com/netty/netty/issues/4357
+            thread = t;
+            t.start();
         }
     }
 
@@ -327,32 +235,39 @@ public final class GlobalEventExecutor extends AbstractEventExecutor {
                         logger.warn("Unexpected exception from the global event executor: ", t);
                     }
 
-                    if (task != purgeTask) {
+                    if (task != quietPeriodTask) {
                         continue;
                     }
                 }
 
-                if (taskQueue.isEmpty() && delayedTaskQueue.size() == 1) {
-                    synchronized (stateLock) {
-                        // Terminate if there is no task in the queue (except the purge task).
-                        if (taskQueue.isEmpty() && delayedTaskQueue.size() == 1) {
-                            state = ST_NOT_STARTED;
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-    }
+                Queue<ScheduledFutureTask<?>> scheduledTaskQueue = GlobalEventExecutor.this.scheduledTaskQueue;
+                // Terminate if there is no task in the queue (except the noop task).
+                if (taskQueue.isEmpty() && (scheduledTaskQueue == null || scheduledTaskQueue.size() == 1)) {
+                    // Mark the current thread as stopped.
+                    // The following CAS must always success and must be uncontended,
+                    // because only one thread should be running at the same time.
+                    boolean stopped = started.compareAndSet(true, false);
+                    assert stopped;
 
-    private final class PurgeTask implements Runnable {
-        @Override
-        public void run() {
-            Iterator<ScheduledFutureTask<?>> i = delayedTaskQueue.iterator();
-            while (i.hasNext()) {
-                ScheduledFutureTask<?> task = i.next();
-                if (task.isCancelled()) {
-                    i.remove();
+                    // Check if there are pending entries added by execute() or schedule*() while we do CAS above.
+                    if (taskQueue.isEmpty() && (scheduledTaskQueue == null || scheduledTaskQueue.size() == 1)) {
+                        // A) No new task was added and thus there's nothing to handle
+                        //    -> safe to terminate because there's nothing left to do
+                        // B) A new thread started and handled all the new tasks.
+                        //    -> safe to terminate the new thread will take care the rest
+                        break;
+                    }
+
+                    // There are pending tasks added again.
+                    if (!started.compareAndSet(false, true)) {
+                        // startThread() started a new thread and set 'started' to true.
+                        // -> terminate this thread so that the new thread reads from taskQueue exclusively.
+                        break;
+                    }
+
+                    // New tasks were added, but this worker was faster to set 'started' to true.
+                    // i.e. a new worker thread was not started by startThread().
+                    // -> keep this thread alive to handle the newly added entries.
                 }
             }
         }

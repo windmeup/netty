@@ -22,16 +22,16 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 /**
- * The {@link EventExecutorGroup} is responsible to provide {@link EventExecutor}'s to use via its
- * {@link #next()} method. Beside this it also is responsible to handle their live-cycle and allows
- * to shut them down in a global fashion.
+ * The {@link EventExecutorGroup} is responsible for providing the {@link EventExecutor}'s to use
+ * via its {@link #next()} method. Besides this, it is also responsible for handling their
+ * life-cycle and allows shutting them down in a global fashion.
  *
  */
 public interface EventExecutorGroup extends ScheduledExecutorService, Iterable<EventExecutor> {
 
     /**
-     * Returns {@code true} if and only if this executor was started to be
-     * {@linkplain #shutdownGracefully() shut down gracefuclly} or was {@linkplain #isShutdown() shut down}.
+     * Returns {@code true} if and only if all {@link EventExecutor}s managed by this {@link EventExecutorGroup}
+     * are being {@linkplain #shutdownGracefully() shut down gracefully} or was {@linkplain #isShutdown() shut down}.
      */
     boolean isShuttingDown();
 
@@ -59,7 +59,8 @@ public interface EventExecutorGroup extends ScheduledExecutorService, Iterable<E
     Future<?> shutdownGracefully(long quietPeriod, long timeout, TimeUnit unit);
 
     /**
-     * Returns the {@link Future} which is notified when this executor has been terminated.
+     * Returns the {@link Future} which is notified when all {@link EventExecutor}s managed by this
+     * {@link EventExecutorGroup} have been terminated.
      */
     Future<?> terminationFuture();
 
@@ -78,14 +79,10 @@ public interface EventExecutorGroup extends ScheduledExecutorService, Iterable<E
     List<Runnable> shutdownNow();
 
     /**
-     * Returns one of the {@link EventExecutor}s that belong to this group.
+     * Returns one of the {@link EventExecutor}s managed by this {@link EventExecutorGroup}.
      */
     EventExecutor next();
 
-    /**
-     * Returns a read-only {@link Iterator} over all {@link EventExecutor}, which are handled by this
-     * {@link EventExecutorGroup} at the time of invoke this method.
-     */
     @Override
     Iterator<EventExecutor> iterator();
 

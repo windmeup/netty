@@ -30,21 +30,9 @@ public class JdkZlibTest extends ZlibTest {
         return new JdkZlibDecoder(wrapper);
     }
 
+    @Test(expected = DecompressionException.class)
     @Override
-    @Test(expected = IllegalArgumentException.class)
-    public void testZLIB_OR_NONE() throws Exception {
-        new JdkZlibDecoder(ZlibWrapper.ZLIB_OR_NONE);
-    }
-
-    @Override
-    @Test(expected = IllegalArgumentException.class)
-    public void testZLIB_OR_NONE2() throws Exception {
-        new JdkZlibDecoder(ZlibWrapper.ZLIB_OR_NONE);
-    }
-
-    @Override
-    @Test(expected = IllegalArgumentException.class)
     public void testZLIB_OR_NONE3() throws Exception {
-        new JdkZlibDecoder(ZlibWrapper.ZLIB_OR_NONE);
+        super.testZLIB_OR_NONE3();
     }
 }

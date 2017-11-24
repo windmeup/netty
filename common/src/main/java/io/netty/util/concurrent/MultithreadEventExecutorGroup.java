@@ -17,7 +17,7 @@ package io.netty.util.concurrent;
 
 import java.util.Collections;
 import java.util.Iterator;
-import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.Set;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ThreadFactory;
@@ -31,9 +31,10 @@ import java.util.concurrent.atomic.AtomicInteger;
 public abstract class MultithreadEventExecutorGroup extends AbstractEventExecutorGroup {
 
     private final EventExecutor[] children;
-    private final AtomicInteger childIndex = new AtomicInteger();
+    private final Set<EventExecutor> readonlyChildren;
     private final AtomicInteger terminatedChildren = new AtomicInteger();
     private final Promise<?> terminationFuture = new DefaultPromise(GlobalEventExecutor.INSTANCE);
+    private final EventExecutorChooserFactory.EventExecutorChooser chooser;
 
     /**
      * Create a new instance.
@@ -54,6 +55,19 @@ public abstract class MultithreadEventExecutorGroup extends AbstractEventExecuto
      * @param args              arguments which will passed to each {@link #newChild(Executor, Object...)} call
      */
     protected MultithreadEventExecutorGroup(int nThreads, Executor executor, Object... args) {
+        this(nThreads, executor, DefaultEventExecutorChooserFactory.INSTANCE, args);
+    }
+
+    /**
+     * Create a new instance.
+     *
+     * @param nThreads          the number of threads that will be used by this instance.
+     * @param executor          the Executor to use, or {@code null} if the default should be used.
+     * @param chooserFactory    the {@link EventExecutorChooserFactory} to use.
+     * @param args              arguments which will passed to each {@link #newChild(Executor, Object...)} call
+     */
+    protected MultithreadEventExecutorGroup(int nThreads, Executor executor,
+                                            EventExecutorChooserFactory chooserFactory, Object... args) {
         if (nThreads <= 0) {
             throw new IllegalArgumentException(String.format("nThreads: %d (expected: > 0)", nThreads));
         }
@@ -62,7 +76,8 @@ public abstract class MultithreadEventExecutorGroup extends AbstractEventExecuto
             executor = new ThreadPerTaskExecutor(newDefaultThreadFactory());
         }
 
-        children = new SingleThreadEventExecutor[nThreads];
+        children = new EventExecutor[nThreads];
+
         for (int i = 0; i < nThreads; i ++) {
             boolean success = false;
             try {
@@ -84,6 +99,7 @@ public abstract class MultithreadEventExecutorGroup extends AbstractEventExecuto
                                 e.awaitTermination(Integer.MAX_VALUE, TimeUnit.SECONDS);
                             }
                         } catch (InterruptedException interrupted) {
+                            // Let the caller handle the interruption.
                             Thread.currentThread().interrupt();
                             break;
                         }
@@ -91,6 +107,8 @@ public abstract class MultithreadEventExecutorGroup extends AbstractEventExecuto
                 }
             }
         }
+
+        chooser = chooserFactory.newChooser(children);
 
         final FutureListener<Object> terminationListener = new FutureListener<Object>() {
             @Override
@@ -104,6 +122,10 @@ public abstract class MultithreadEventExecutorGroup extends AbstractEventExecuto
         for (EventExecutor e: children) {
             e.terminationFuture().addListener(terminationListener);
         }
+
+        Set<EventExecutor> childrenSet = new LinkedHashSet<EventExecutor>(children.length);
+        Collections.addAll(childrenSet, children);
+        readonlyChildren = Collections.unmodifiableSet(childrenSet);
     }
 
     protected ThreadFactory newDefaultThreadFactory() {
@@ -112,12 +134,12 @@ public abstract class MultithreadEventExecutorGroup extends AbstractEventExecuto
 
     @Override
     public EventExecutor next() {
-        return children[Math.abs(childIndex.getAndIncrement() % children.length)];
+        return chooser.next();
     }
 
     @Override
     public Iterator<EventExecutor> iterator() {
-        return children().iterator();
+        return readonlyChildren.iterator();
     }
 
     /**
@@ -126,15 +148,6 @@ public abstract class MultithreadEventExecutorGroup extends AbstractEventExecuto
      */
     public final int executorCount() {
         return children.length;
-    }
-
-    /**
-     * Return a safe-copy of all of the children of this group.
-     */
-    protected Set<EventExecutor> children() {
-        Set<EventExecutor> children = Collections.newSetFromMap(new LinkedHashMap<EventExecutor, Boolean>());
-        Collections.addAll(children, this.children);
-        return children;
     }
 
     /**

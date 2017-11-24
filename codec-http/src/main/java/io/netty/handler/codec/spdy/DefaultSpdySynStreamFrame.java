@@ -23,21 +23,32 @@ import io.netty.util.internal.StringUtil;
 public class DefaultSpdySynStreamFrame extends DefaultSpdyHeadersFrame
         implements SpdySynStreamFrame {
 
-    private int associatedToStreamId;
+    private int associatedStreamId;
     private byte priority;
     private boolean unidirectional;
 
     /**
      * Creates a new instance.
      *
-     * @param streamId             the Stream-ID of this frame
-     * @param associatedToStreamId the Associated-To-Stream-ID of this frame
-     * @param priority             the priority of the stream
+     * @param streamId           the Stream-ID of this frame
+     * @param associatedStreamId the Associated-To-Stream-ID of this frame
+     * @param priority           the priority of the stream
      */
-    public DefaultSpdySynStreamFrame(
-            int streamId, int associatedToStreamId, byte priority) {
-        super(streamId);
-        setAssociatedToStreamId(associatedToStreamId);
+    public DefaultSpdySynStreamFrame(int streamId, int associatedStreamId, byte priority) {
+        this(streamId, associatedStreamId, priority, true);
+    }
+
+    /**
+     * Creates a new instance.
+     *
+     * @param streamId           the Stream-ID of this frame
+     * @param associatedStreamId the Associated-To-Stream-ID of this frame
+     * @param priority           the priority of the stream
+     * @param validateHeaders    validate the header names and values when adding them to the {@link SpdyHeaders}
+     */
+    public DefaultSpdySynStreamFrame(int streamId, int associatedStreamId, byte priority, boolean validateHeaders) {
+        super(streamId, validateHeaders);
+        setAssociatedStreamId(associatedStreamId);
         setPriority(priority);
     }
 
@@ -60,23 +71,23 @@ public class DefaultSpdySynStreamFrame extends DefaultSpdyHeadersFrame
     }
 
     @Override
-    public int getAssociatedToStreamId() {
-        return associatedToStreamId;
+    public int associatedStreamId() {
+        return associatedStreamId;
     }
 
     @Override
-    public SpdySynStreamFrame setAssociatedToStreamId(int associatedToStreamId) {
-        if (associatedToStreamId < 0) {
+    public SpdySynStreamFrame setAssociatedStreamId(int associatedStreamId) {
+        if (associatedStreamId < 0) {
             throw new IllegalArgumentException(
                     "Associated-To-Stream-ID cannot be negative: " +
-                    associatedToStreamId);
+                    associatedStreamId);
         }
-        this.associatedToStreamId = associatedToStreamId;
+        this.associatedStreamId = associatedStreamId;
         return this;
     }
 
     @Override
-    public byte getPriority() {
+    public byte priority() {
         return priority;
     }
 
@@ -103,27 +114,27 @@ public class DefaultSpdySynStreamFrame extends DefaultSpdyHeadersFrame
 
     @Override
     public String toString() {
-        StringBuilder buf = new StringBuilder();
-        buf.append(StringUtil.simpleClassName(this));
-        buf.append("(last: ");
-        buf.append(isLast());
-        buf.append("; unidirectional: ");
-        buf.append(isUnidirectional());
-        buf.append(')');
-        buf.append(StringUtil.NEWLINE);
-        buf.append("--> Stream-ID = ");
-        buf.append(getStreamId());
-        buf.append(StringUtil.NEWLINE);
-        if (associatedToStreamId != 0) {
-            buf.append("--> Associated-To-Stream-ID = ");
-            buf.append(getAssociatedToStreamId());
-            buf.append(StringUtil.NEWLINE);
+        StringBuilder buf = new StringBuilder()
+            .append(StringUtil.simpleClassName(this))
+            .append("(last: ")
+            .append(isLast())
+            .append("; unidirectional: ")
+            .append(isUnidirectional())
+            .append(')')
+            .append(StringUtil.NEWLINE)
+            .append("--> Stream-ID = ")
+            .append(streamId())
+            .append(StringUtil.NEWLINE);
+        if (associatedStreamId != 0) {
+            buf.append("--> Associated-To-Stream-ID = ")
+               .append(associatedStreamId())
+               .append(StringUtil.NEWLINE);
         }
-        buf.append("--> Priority = ");
-        buf.append(getPriority());
-        buf.append(StringUtil.NEWLINE);
-        buf.append("--> Headers:");
-        buf.append(StringUtil.NEWLINE);
+        buf.append("--> Priority = ")
+           .append(priority())
+           .append(StringUtil.NEWLINE)
+           .append("--> Headers:")
+           .append(StringUtil.NEWLINE);
         appendHeaders(buf);
 
         // Remove the last newline.

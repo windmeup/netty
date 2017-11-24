@@ -29,7 +29,9 @@ public class HexDumpProxyFrontendHandler extends ChannelInboundHandlerAdapter {
     private final String remoteHost;
     private final int remotePort;
 
-    private volatile Channel outboundChannel;
+    // As we use inboundChannel.eventLoop() when building the Bootstrap this does not need to be volatile as
+    // the outboundChannel will use the same EventLoop (and therefore Thread) as the inboundChannel.
+    private Channel outboundChannel;
 
     public HexDumpProxyFrontendHandler(String remoteHost, int remotePort) {
         this.remoteHost = remoteHost;
@@ -37,7 +39,7 @@ public class HexDumpProxyFrontendHandler extends ChannelInboundHandlerAdapter {
     }
 
     @Override
-    public void channelActive(ChannelHandlerContext ctx) throws Exception {
+    public void channelActive(ChannelHandlerContext ctx) {
         final Channel inboundChannel = ctx.channel();
 
         // Start the connection attempt.
@@ -50,7 +52,7 @@ public class HexDumpProxyFrontendHandler extends ChannelInboundHandlerAdapter {
         outboundChannel = f.channel();
         f.addListener(new ChannelFutureListener() {
             @Override
-            public void operationComplete(ChannelFuture future) throws Exception {
+            public void operationComplete(ChannelFuture future) {
                 if (future.isSuccess()) {
                     // connection complete start to read first data
                     inboundChannel.read();
@@ -63,11 +65,11 @@ public class HexDumpProxyFrontendHandler extends ChannelInboundHandlerAdapter {
     }
 
     @Override
-    public void channelRead(final ChannelHandlerContext ctx, Object msg) throws Exception {
+    public void channelRead(final ChannelHandlerContext ctx, Object msg) {
         if (outboundChannel.isActive()) {
             outboundChannel.writeAndFlush(msg).addListener(new ChannelFutureListener() {
                 @Override
-                public void operationComplete(ChannelFuture future) throws Exception {
+                public void operationComplete(ChannelFuture future) {
                     if (future.isSuccess()) {
                         // was able to flush out data, start to read the next chunk
                         ctx.channel().read();
@@ -80,14 +82,14 @@ public class HexDumpProxyFrontendHandler extends ChannelInboundHandlerAdapter {
     }
 
     @Override
-    public void channelInactive(ChannelHandlerContext ctx) throws Exception {
+    public void channelInactive(ChannelHandlerContext ctx) {
         if (outboundChannel != null) {
             closeOnFlush(outboundChannel);
         }
     }
 
     @Override
-    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
+    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
         cause.printStackTrace();
         closeOnFlush(ctx.channel());
     }

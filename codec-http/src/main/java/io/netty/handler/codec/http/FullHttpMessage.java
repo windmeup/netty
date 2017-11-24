@@ -15,6 +15,8 @@
  */
 package io.netty.handler.codec.http;
 
+import io.netty.buffer.ByteBuf;
+
 /**
  * Combines {@link HttpMessage} and {@link LastHttpContent} into one
  * message. So it represent a <i>complete</i> http message.
@@ -22,6 +24,15 @@ package io.netty.handler.codec.http;
 public interface FullHttpMessage extends HttpMessage, LastHttpContent {
     @Override
     FullHttpMessage copy();
+
+    @Override
+    FullHttpMessage duplicate();
+
+    @Override
+    FullHttpMessage retainedDuplicate();
+
+    @Override
+    FullHttpMessage replace(ByteBuf content);
 
     @Override
     FullHttpMessage retain(int increment);
@@ -34,7 +45,4 @@ public interface FullHttpMessage extends HttpMessage, LastHttpContent {
 
     @Override
     FullHttpMessage touch(Object hint);
-
-    @Override
-    FullHttpMessage duplicate();
 }

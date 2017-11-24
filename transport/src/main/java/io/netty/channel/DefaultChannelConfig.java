@@ -16,54 +16,62 @@
 package io.netty.channel;
 
 import io.netty.buffer.ByteBufAllocator;
-import io.netty.channel.nio.AbstractNioByteChannel;
-import io.netty.channel.socket.SocketChannelConfig;
 
 import java.util.IdentityHashMap;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
+import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
 
-import static io.netty.channel.ChannelOption.*;
+import static io.netty.channel.ChannelOption.ALLOCATOR;
+import static io.netty.channel.ChannelOption.AUTO_CLOSE;
+import static io.netty.channel.ChannelOption.AUTO_READ;
+import static io.netty.channel.ChannelOption.CONNECT_TIMEOUT_MILLIS;
+import static io.netty.channel.ChannelOption.MAX_MESSAGES_PER_READ;
+import static io.netty.channel.ChannelOption.MESSAGE_SIZE_ESTIMATOR;
+import static io.netty.channel.ChannelOption.RCVBUF_ALLOCATOR;
+import static io.netty.channel.ChannelOption.SINGLE_EVENTEXECUTOR_PER_GROUP;
+import static io.netty.channel.ChannelOption.WRITE_BUFFER_HIGH_WATER_MARK;
+import static io.netty.channel.ChannelOption.WRITE_BUFFER_LOW_WATER_MARK;
+import static io.netty.channel.ChannelOption.WRITE_BUFFER_WATER_MARK;
+import static io.netty.channel.ChannelOption.WRITE_SPIN_COUNT;
+import static io.netty.util.internal.ObjectUtil.checkNotNull;
 
 /**
- * The default {@link SocketChannelConfig} implementation.
+ * The default {@link ChannelConfig} implementation.
  */
 public class DefaultChannelConfig implements ChannelConfig {
-
-    private static final RecvByteBufAllocator DEFAULT_RCVBUF_ALLOCATOR = AdaptiveRecvByteBufAllocator.DEFAULT;
     private static final MessageSizeEstimator DEFAULT_MSG_SIZE_ESTIMATOR = DefaultMessageSizeEstimator.DEFAULT;
 
     private static final int DEFAULT_CONNECT_TIMEOUT = 30000;
 
+    private static final AtomicIntegerFieldUpdater<DefaultChannelConfig> AUTOREAD_UPDATER =
+            AtomicIntegerFieldUpdater.newUpdater(DefaultChannelConfig.class, "autoRead");
+    private static final AtomicReferenceFieldUpdater<DefaultChannelConfig, WriteBufferWaterMark> WATERMARK_UPDATER =
+            AtomicReferenceFieldUpdater.newUpdater(
+                    DefaultChannelConfig.class, WriteBufferWaterMark.class, "writeBufferWaterMark");
+
     protected final Channel channel;
 
     private volatile ByteBufAllocator allocator = ByteBufAllocator.DEFAULT;
-    private volatile RecvByteBufAllocator rcvBufAllocator = DEFAULT_RCVBUF_ALLOCATOR;
+    private volatile RecvByteBufAllocator rcvBufAllocator;
     private volatile MessageSizeEstimator msgSizeEstimator = DEFAULT_MSG_SIZE_ESTIMATOR;
 
     private volatile int connectTimeoutMillis = DEFAULT_CONNECT_TIMEOUT;
-    private volatile int maxMessagesPerRead;
     private volatile int writeSpinCount = 16;
-    private volatile boolean autoRead = true;
+    @SuppressWarnings("FieldMayBeFinal")
+    private volatile int autoRead = 1;
     private volatile boolean autoClose = true;
-    private volatile int writeBufferHighWaterMark = 64 * 1024;
-    private volatile int writeBufferLowWaterMark = 32 * 1024;
+    private volatile WriteBufferWaterMark writeBufferWaterMark = WriteBufferWaterMark.DEFAULT;
+    private volatile boolean pinEventExecutor = true;
 
     public DefaultChannelConfig(Channel channel) {
-        if (channel == null) {
-            throw new NullPointerException("channel");
-        }
-        this.channel = channel;
+        this(channel, new AdaptiveRecvByteBufAllocator());
+    }
 
-        if (channel instanceof ServerChannel || channel instanceof AbstractNioByteChannel) {
-            // Server channels: Accept as many incoming connections as possible.
-            // NIO byte channels: Implemented to reduce unnecessary system calls even if it's > 1.
-            //                    See https://github.com/netty/netty/issues/2079
-            // TODO: Add some property to ChannelMetadata so we can remove the ugly instanceof
-            maxMessagesPerRead = 16;
-        } else {
-            maxMessagesPerRead = 1;
-        }
+    protected DefaultChannelConfig(Channel channel, RecvByteBufAllocator allocator) {
+        setRecvByteBufAllocator(allocator, channel.metadata());
+        this.channel = channel;
     }
 
     @Override
@@ -73,7 +81,8 @@ public class DefaultChannelConfig implements ChannelConfig {
                 null,
                 CONNECT_TIMEOUT_MILLIS, MAX_MESSAGES_PER_READ, WRITE_SPIN_COUNT,
                 ALLOCATOR, AUTO_READ, AUTO_CLOSE, RCVBUF_ALLOCATOR, WRITE_BUFFER_HIGH_WATER_MARK,
-                WRITE_BUFFER_LOW_WATER_MARK, MESSAGE_SIZE_ESTIMATOR);
+                WRITE_BUFFER_LOW_WATER_MARK, WRITE_BUFFER_WATER_MARK, MESSAGE_SIZE_ESTIMATOR,
+                SINGLE_EVENTEXECUTOR_PER_GROUP);
     }
 
     protected Map<ChannelOption<?>, Object> getOptions(
@@ -138,8 +147,14 @@ public class DefaultChannelConfig implements ChannelConfig {
         if (option == WRITE_BUFFER_LOW_WATER_MARK) {
             return (T) Integer.valueOf(getWriteBufferLowWaterMark());
         }
+        if (option == WRITE_BUFFER_WATER_MARK) {
+            return (T) getWriteBufferWaterMark();
+        }
         if (option == MESSAGE_SIZE_ESTIMATOR) {
             return (T) getMessageSizeEstimator();
+        }
+        if (option == SINGLE_EVENTEXECUTOR_PER_GROUP) {
+            return (T) Boolean.valueOf(getPinEventExecutorPerGroup());
         }
         return null;
     }
@@ -167,8 +182,12 @@ public class DefaultChannelConfig implements ChannelConfig {
             setWriteBufferHighWaterMark((Integer) value);
         } else if (option == WRITE_BUFFER_LOW_WATER_MARK) {
             setWriteBufferLowWaterMark((Integer) value);
+        } else if (option == WRITE_BUFFER_WATER_MARK) {
+            setWriteBufferWaterMark((WriteBufferWaterMark) value);
         } else if (option == MESSAGE_SIZE_ESTIMATOR) {
             setMessageSizeEstimator((MessageSizeEstimator) value);
+        } else if (option == SINGLE_EVENTEXECUTOR_PER_GROUP) {
+            setPinEventExecutorPerGroup((Boolean) value);
         } else {
             return false;
         }
@@ -198,18 +217,41 @@ public class DefaultChannelConfig implements ChannelConfig {
         return this;
     }
 
+    /**
+     * {@inheritDoc}
+     * <p>
+     * @throws IllegalStateException if {@link #getRecvByteBufAllocator()} does not return an object of type
+     * {@link MaxMessagesRecvByteBufAllocator}.
+     */
     @Override
+    @Deprecated
     public int getMaxMessagesPerRead() {
-        return maxMessagesPerRead;
+        try {
+            MaxMessagesRecvByteBufAllocator allocator = getRecvByteBufAllocator();
+            return allocator.maxMessagesPerRead();
+        } catch (ClassCastException e) {
+            throw new IllegalStateException("getRecvByteBufAllocator() must return an object of type " +
+                    "MaxMessagesRecvByteBufAllocator", e);
+        }
     }
 
+    /**
+     * {@inheritDoc}
+     * <p>
+     * @throws IllegalStateException if {@link #getRecvByteBufAllocator()} does not return an object of type
+     * {@link MaxMessagesRecvByteBufAllocator}.
+     */
     @Override
+    @Deprecated
     public ChannelConfig setMaxMessagesPerRead(int maxMessagesPerRead) {
-        if (maxMessagesPerRead <= 0) {
-            throw new IllegalArgumentException("maxMessagesPerRead: " + maxMessagesPerRead + " (expected: > 0)");
+        try {
+            MaxMessagesRecvByteBufAllocator allocator = getRecvByteBufAllocator();
+            allocator.maxMessagesPerRead(maxMessagesPerRead);
+            return this;
+        } catch (ClassCastException e) {
+            throw new IllegalStateException("getRecvByteBufAllocator() must return an object of type " +
+                    "MaxMessagesRecvByteBufAllocator", e);
         }
-        this.maxMessagesPerRead = maxMessagesPerRead;
-        return this;
     }
 
     @Override
@@ -241,34 +283,54 @@ public class DefaultChannelConfig implements ChannelConfig {
         return this;
     }
 
+    @SuppressWarnings("unchecked")
     @Override
-    public RecvByteBufAllocator getRecvByteBufAllocator() {
-        return rcvBufAllocator;
+    public <T extends RecvByteBufAllocator> T getRecvByteBufAllocator() {
+        return (T) rcvBufAllocator;
     }
 
     @Override
     public ChannelConfig setRecvByteBufAllocator(RecvByteBufAllocator allocator) {
-        if (allocator == null) {
+        rcvBufAllocator = checkNotNull(allocator, "allocator");
+        return this;
+    }
+
+    /**
+     * Set the {@link RecvByteBufAllocator} which is used for the channel to allocate receive buffers.
+     * @param allocator the allocator to set.
+     * @param metadata Used to set the {@link ChannelMetadata#defaultMaxMessagesPerRead()} if {@code allocator}
+     * is of type {@link MaxMessagesRecvByteBufAllocator}.
+     */
+    private void setRecvByteBufAllocator(RecvByteBufAllocator allocator, ChannelMetadata metadata) {
+        if (allocator instanceof MaxMessagesRecvByteBufAllocator) {
+            ((MaxMessagesRecvByteBufAllocator) allocator).maxMessagesPerRead(metadata.defaultMaxMessagesPerRead());
+        } else if (allocator == null) {
             throw new NullPointerException("allocator");
         }
-        rcvBufAllocator = allocator;
-        return this;
+        setRecvByteBufAllocator(allocator);
     }
 
     @Override
     public boolean isAutoRead() {
-        return autoRead;
+        return autoRead == 1;
     }
 
     @Override
     public ChannelConfig setAutoRead(boolean autoRead) {
-        boolean oldAutoRead = this.autoRead;
-        this.autoRead = autoRead;
+        boolean oldAutoRead = AUTOREAD_UPDATER.getAndSet(this, autoRead ? 1 : 0) == 1;
         if (autoRead && !oldAutoRead) {
             channel.read();
+        } else if (!autoRead && oldAutoRead) {
+            autoReadCleared();
         }
         return this;
     }
+
+    /**
+     * Is called once {@link #setAutoRead(boolean)} is called with {@code false} and {@link #isAutoRead()} was
+     * {@code true} before.
+     */
+    protected void autoReadCleared() { }
 
     @Override
     public boolean isAutoClose() {
@@ -283,44 +345,65 @@ public class DefaultChannelConfig implements ChannelConfig {
 
     @Override
     public int getWriteBufferHighWaterMark() {
-        return writeBufferHighWaterMark;
+        return writeBufferWaterMark.high();
     }
 
     @Override
     public ChannelConfig setWriteBufferHighWaterMark(int writeBufferHighWaterMark) {
-        if (writeBufferHighWaterMark < getWriteBufferLowWaterMark()) {
-            throw new IllegalArgumentException(
-                    "writeBufferHighWaterMark cannot be less than " +
-                            "writeBufferLowWaterMark (" + getWriteBufferLowWaterMark() + "): " +
-                            writeBufferHighWaterMark);
-        }
         if (writeBufferHighWaterMark < 0) {
             throw new IllegalArgumentException(
                     "writeBufferHighWaterMark must be >= 0");
         }
-        this.writeBufferHighWaterMark = writeBufferHighWaterMark;
-        return this;
+        for (;;) {
+            WriteBufferWaterMark waterMark = writeBufferWaterMark;
+            if (writeBufferHighWaterMark < waterMark.low()) {
+                throw new IllegalArgumentException(
+                        "writeBufferHighWaterMark cannot be less than " +
+                                "writeBufferLowWaterMark (" + waterMark.low() + "): " +
+                                writeBufferHighWaterMark);
+            }
+            if (WATERMARK_UPDATER.compareAndSet(this, waterMark,
+                    new WriteBufferWaterMark(waterMark.low(), writeBufferHighWaterMark, false))) {
+                return this;
+            }
+        }
     }
 
     @Override
     public int getWriteBufferLowWaterMark() {
-        return writeBufferLowWaterMark;
+        return writeBufferWaterMark.low();
     }
 
     @Override
     public ChannelConfig setWriteBufferLowWaterMark(int writeBufferLowWaterMark) {
-        if (writeBufferLowWaterMark > getWriteBufferHighWaterMark()) {
-            throw new IllegalArgumentException(
-                    "writeBufferLowWaterMark cannot be greater than " +
-                            "writeBufferHighWaterMark (" + getWriteBufferHighWaterMark() + "): " +
-                            writeBufferLowWaterMark);
-        }
         if (writeBufferLowWaterMark < 0) {
             throw new IllegalArgumentException(
                     "writeBufferLowWaterMark must be >= 0");
         }
-        this.writeBufferLowWaterMark = writeBufferLowWaterMark;
+        for (;;) {
+            WriteBufferWaterMark waterMark = writeBufferWaterMark;
+            if (writeBufferLowWaterMark > waterMark.high()) {
+                throw new IllegalArgumentException(
+                        "writeBufferLowWaterMark cannot be greater than " +
+                                "writeBufferHighWaterMark (" + waterMark.high() + "): " +
+                                writeBufferLowWaterMark);
+            }
+            if (WATERMARK_UPDATER.compareAndSet(this, waterMark,
+                    new WriteBufferWaterMark(writeBufferLowWaterMark, waterMark.high(), false))) {
+                return this;
+            }
+        }
+    }
+
+    @Override
+    public ChannelConfig setWriteBufferWaterMark(WriteBufferWaterMark writeBufferWaterMark) {
+        this.writeBufferWaterMark = checkNotNull(writeBufferWaterMark, "writeBufferWaterMark");
         return this;
+    }
+
+    @Override
+    public WriteBufferWaterMark getWriteBufferWaterMark() {
+        return writeBufferWaterMark;
     }
 
     @Override
@@ -336,4 +419,14 @@ public class DefaultChannelConfig implements ChannelConfig {
         msgSizeEstimator = estimator;
         return this;
     }
+
+    private ChannelConfig setPinEventExecutorPerGroup(boolean pinEventExecutor) {
+        this.pinEventExecutor = pinEventExecutor;
+        return this;
+    }
+
+    private boolean getPinEventExecutorPerGroup() {
+        return pinEventExecutor;
+    }
+
 }

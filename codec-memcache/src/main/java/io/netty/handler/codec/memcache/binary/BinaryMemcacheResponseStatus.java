@@ -15,10 +15,12 @@
  */
 package io.netty.handler.codec.memcache.binary;
 
+import io.netty.util.internal.UnstableApi;
+
 /**
- * Contains all possible status values a
- * {@link BinaryMemcacheResponseHeader} can return.
+ * Contains all possible status values a {@link BinaryMemcacheResponse} can return.
  */
+@UnstableApi
 public final class BinaryMemcacheResponseStatus {
 
     private BinaryMemcacheResponseStatus() {

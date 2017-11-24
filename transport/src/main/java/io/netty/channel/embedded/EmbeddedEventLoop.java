@@ -21,16 +21,27 @@ import io.netty.channel.ChannelPromise;
 import io.netty.channel.DefaultChannelPromise;
 import io.netty.channel.EventLoop;
 import io.netty.channel.EventLoopGroup;
-import io.netty.util.concurrent.AbstractEventExecutor;
+import io.netty.util.concurrent.AbstractScheduledEventExecutor;
 import io.netty.util.concurrent.Future;
+import io.netty.util.internal.ObjectUtil;
 
 import java.util.ArrayDeque;
 import java.util.Queue;
 import java.util.concurrent.TimeUnit;
 
-final class EmbeddedEventLoop extends AbstractEventExecutor implements EventLoop {
+final class EmbeddedEventLoop extends AbstractScheduledEventExecutor implements EventLoop {
 
     private final Queue<Runnable> tasks = new ArrayDeque<Runnable>(2);
+
+    @Override
+    public EventLoopGroup parent() {
+        return (EventLoopGroup) super.parent();
+    }
+
+    @Override
+    public EventLoop next() {
+        return (EventLoop) super.next();
+    }
 
     @Override
     public void execute(Runnable command) {
@@ -49,6 +60,27 @@ final class EmbeddedEventLoop extends AbstractEventExecutor implements EventLoop
 
             task.run();
         }
+    }
+
+    long runScheduledTasks() {
+        long time = AbstractScheduledEventExecutor.nanoTime();
+        for (;;) {
+            Runnable task = pollScheduledTask(time);
+            if (task == null) {
+                return nextScheduledTaskNano();
+            }
+
+            task.run();
+        }
+    }
+
+    long nextScheduledTask() {
+        return nextScheduledTaskNano();
+    }
+
+    @Override
+    protected void cancelScheduledTasks() {
+        super.cancelScheduledTasks();
     }
 
     @Override
@@ -83,17 +115,23 @@ final class EmbeddedEventLoop extends AbstractEventExecutor implements EventLoop
     }
 
     @Override
-    public boolean awaitTermination(long timeout, TimeUnit unit)
-            throws InterruptedException {
-        Thread.sleep(unit.toMillis(timeout));
+    public boolean awaitTermination(long timeout, TimeUnit unit) {
         return false;
     }
 
     @Override
     public ChannelFuture register(Channel channel) {
-        return register(channel, new DefaultChannelPromise(channel, this));
+        return register(new DefaultChannelPromise(channel, this));
     }
 
+    @Override
+    public ChannelFuture register(ChannelPromise promise) {
+        ObjectUtil.checkNotNull(promise, "promise");
+        promise.channel().unsafe().register(this, promise);
+        return promise;
+    }
+
+    @Deprecated
     @Override
     public ChannelFuture register(Channel channel, ChannelPromise promise) {
         channel.unsafe().register(this, promise);
@@ -108,15 +146,5 @@ final class EmbeddedEventLoop extends AbstractEventExecutor implements EventLoop
     @Override
     public boolean inEventLoop(Thread thread) {
         return true;
-    }
-
-    @Override
-    public EventLoop next() {
-        return this;
-    }
-
-    @Override
-    public EventLoopGroup parent() {
-        return this;
     }
 }

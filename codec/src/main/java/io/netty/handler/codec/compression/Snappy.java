@@ -16,15 +16,14 @@
 package io.netty.handler.codec.compression;
 
 import io.netty.buffer.ByteBuf;
-import io.netty.buffer.ByteBufUtil;
 
 /**
  * Uncompresses an input {@link ByteBuf} encoded with Snappy compression into an
  * output {@link ByteBuf}.
  *
- * See http://code.google.com/p/snappy/source/browse/trunk/format_description.txt
+ * See <a href="https://github.com/google/snappy/blob/master/format_description.txt">snappy format</a>.
  */
-public class Snappy {
+public final class Snappy {
 
     private static final int MAX_HT_SIZE = 1 << 14;
     private static final int MIN_COMPRESSIBLE_BYTES = 15;
@@ -57,7 +56,7 @@ public class Snappy {
         written = 0;
     }
 
-    public void encode(ByteBuf in, ByteBuf out, int length) {
+    public void encode(final ByteBuf in, final ByteBuf out, final int length) {
         // Write the preamble length to the output buffer
         for (int i = 0;; i ++) {
             int b = length >>> i * 7;
@@ -70,15 +69,14 @@ public class Snappy {
         }
 
         int inIndex = in.readerIndex();
-        final int baseIndex = in.readerIndex();
-        final int maxIndex = length;
+        final int baseIndex = inIndex;
 
-        final short[] table = getHashTable(maxIndex);
-        final int shift = 32 - (int) Math.floor(Math.log(table.length) / Math.log(2));
+        final short[] table = getHashTable(length);
+        final int shift = Integer.numberOfLeadingZeros(table.length) + 1;
 
         int nextEmit = inIndex;
 
-        if (maxIndex - inIndex >= MIN_COMPRESSIBLE_BYTES) {
+        if (length - inIndex >= MIN_COMPRESSIBLE_BYTES) {
             int nextHash = hash(in, ++inIndex, shift);
             outer: while (true) {
                 int skip = 32;
@@ -92,7 +90,7 @@ public class Snappy {
                     nextIndex = inIndex + bytesBetweenHashLookups;
 
                     // We need at least 4 remaining bytes to read the hash
-                    if (nextIndex > maxIndex - 4) {
+                    if (nextIndex > length - 4) {
                         break outer;
                     }
 
@@ -109,14 +107,14 @@ public class Snappy {
                 int insertTail;
                 do {
                     int base = inIndex;
-                    int matched = 4 + findMatchingLength(in, candidate + 4, inIndex + 4, maxIndex);
+                    int matched = 4 + findMatchingLength(in, candidate + 4, inIndex + 4, length);
                     inIndex += matched;
                     int offset = base - candidate;
                     encodeCopy(out, offset, matched);
                     in.readerIndex(in.readerIndex() + matched);
                     insertTail = inIndex - 1;
                     nextEmit = inIndex;
-                    if (inIndex >= maxIndex - 4) {
+                    if (inIndex >= length - 4) {
                         break outer;
                     }
 
@@ -134,8 +132,8 @@ public class Snappy {
         }
 
         // If there are any remaining characters, write them out as a literal
-        if (nextEmit < maxIndex) {
-            encodeLiteral(in, out, maxIndex - nextEmit);
+        if (nextEmit < length) {
+            encodeLiteral(in, out, length - nextEmit);
         }
     }
 
@@ -150,7 +148,7 @@ public class Snappy {
      * @return A 32-bit hash of 4 bytes located at index
      */
     private static int hash(ByteBuf in, int index, int shift) {
-        return in.getInt(index) + 0x1e35a7bd >>> shift;
+        return in.getInt(index) * 0x1e35a7bd >>> shift;
     }
 
     /**
@@ -164,15 +162,7 @@ public class Snappy {
         while (htSize < MAX_HT_SIZE && htSize < inputSize) {
             htSize <<= 1;
         }
-
-        short[] table;
-        if (htSize <= 256) {
-            table = new short[256];
-        } else {
-            table = new short[MAX_HT_SIZE];
-        }
-
-        return table;
+        return new short[htSize];
     }
 
     /**
@@ -230,7 +220,7 @@ public class Snappy {
      * @param out The output buffer to copy to
      * @param length The length of the literal to copy
      */
-    private static void encodeLiteral(ByteBuf in, ByteBuf out, int length) {
+    static void encodeLiteral(ByteBuf in, ByteBuf out, int length) {
         if (length < 61) {
             out.writeByte(length - 1 << 2);
         } else {
@@ -282,6 +272,7 @@ public class Snappy {
             switch (state) {
             case READY:
                 state = State.READING_PREAMBLE;
+                // fall through
             case READING_PREAMBLE:
                 int uncompressedLength = readPreamble(in);
                 if (uncompressedLength == PREAMBLE_NOT_FULL) {
@@ -295,6 +286,7 @@ public class Snappy {
                 }
                 out.ensureWritable(uncompressedLength);
                 state = State.READING_TAG;
+                // fall through
             case READING_TAG:
                 if (!in.isReadable()) {
                     return;
@@ -397,7 +389,7 @@ public class Snappy {
      * @param out The output buffer to write the literal to
      * @return The number of bytes appended to the output buffer, or -1 to indicate "try again later"
      */
-    private static int decodeLiteral(byte tag, ByteBuf in, ByteBuf out) {
+    static int decodeLiteral(byte tag, ByteBuf in, ByteBuf out) {
         in.markReaderIndex();
         int length;
         switch(tag >> 2 & 0x3F) {
@@ -411,19 +403,19 @@ public class Snappy {
             if (in.readableBytes() < 2) {
                 return NOT_ENOUGH_INPUT;
             }
-            length = ByteBufUtil.swapShort(in.readShort());
+            length = in.readShortLE();
             break;
         case 62:
             if (in.readableBytes() < 3) {
                 return NOT_ENOUGH_INPUT;
             }
-            length = ByteBufUtil.swapMedium(in.readUnsignedMedium());
+            length = in.readUnsignedMediumLE();
             break;
-        case 64:
+        case 63:
             if (in.readableBytes() < 4) {
                 return NOT_ENOUGH_INPUT;
             }
-            length = ByteBufUtil.swapInt(in.readInt());
+            length = in.readIntLE();
             break;
         default:
             length = tag >> 2 & 0x3F;
@@ -503,7 +495,7 @@ public class Snappy {
 
         int initialIndex = out.writerIndex();
         int length = 1 + (tag >> 2 & 0x03f);
-        int offset = ByteBufUtil.swapShort(in.readShort());
+        int offset = in.readShortLE();
 
         validateOffset(offset, writtenSoFar);
 
@@ -547,7 +539,7 @@ public class Snappy {
 
         int initialIndex = out.writerIndex();
         int length = 1 + (tag >> 2 & 0x03F);
-        int offset = ByteBufUtil.swapInt(in.readInt());
+        int offset = in.readIntLE();
 
         validateOffset(offset, writtenSoFar);
 
@@ -600,7 +592,7 @@ public class Snappy {
      *
      * @param data The input data to calculate the CRC32C checksum of
      */
-    public static int calculateChecksum(ByteBuf data) {
+    static int calculateChecksum(ByteBuf data) {
         return calculateChecksum(data, data.readerIndex(), data.readableBytes());
     }
 
@@ -610,17 +602,10 @@ public class Snappy {
      *
      * @param data The input data to calculate the CRC32C checksum of
      */
-    public static int calculateChecksum(ByteBuf data, int offset, int length) {
+    static int calculateChecksum(ByteBuf data, int offset, int length) {
         Crc32c crc32 = new Crc32c();
         try {
-            if (data.hasArray()) {
-                crc32.update(data.array(), data.arrayOffset() + offset, length);
-            } else {
-                byte[] array = new byte[length];
-                data.getBytes(offset, array);
-                crc32.update(array, 0, length);
-            }
-
+            crc32.update(data, offset, length);
             return maskChecksum((int) crc32.getValue());
         } finally {
             crc32.reset();
